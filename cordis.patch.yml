@@ -1,5 +1,5 @@
 # ============================================================================
-# dsh-whale-arcade 的 bundle patch —— 把启动器插件挂进 DSH 配置树
+# dsh-whale-game 的 bundle patch —— 把启动器插件挂进 DSH 配置树
 # ============================================================================
 #
 # 规则（照 DSH 商城上架契约）：
@@ -7,7 +7,7 @@
 #   - `id` 那一行不能写行尾注释，否则预检正则抓不到 entry ID
 #   - `name` 解析包入口（main → lib/index.js，宿主半侧）
 #   - package.json 里声明了 dsh.client，DSH 的模块系统会同时把这个包
-#     扫描成「浏览器插件」，页面侧从 /plugins/dsh-whale-arcade/client.js 加载
+#     扫描成「浏览器插件」，页面侧从 /plugins/dsh-whale-game/client.js 加载
 #
 # 本插件在宿主侧注册一条路由前缀（/whale-arcade），页面侧在 DSH 左侧栏底部
 # 挂一条细条、点开是一枚悬浮气泡；不碰任何游戏代码，所以游戏厅怎么升级都与
@@ -16,5 +16,5 @@
 # ============================================================================
 
 - insert:
-    - id: dsh-whale-arcade
-      name: 'dsh-whale-arcade'
+    - id: dsh-whale-game
+      name: 'dsh-whale-game'

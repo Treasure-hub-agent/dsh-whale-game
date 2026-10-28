@@ -1,5 +1,5 @@
 /**
- * dsh-whale-arcade —— 宿主半侧（host half）
+ * dsh-whale-game —— 宿主半侧（host half）
  *
  * 职责只有三件事：**起进程 / 探健康 / 关进程**，再把状态用一棵很小的 HTTP
  * 路由暴露给设置页。这里没有一行游戏逻辑——游戏厅是独立项目，插件不 import
@@ -338,14 +338,14 @@ export function apply(ctx: any): void {
   // Promise 拒绝可能被进程级处理当成致命错误。启动器挂了顶多是这张卡片不可用，
   // 绝不该拖垮整个 DSH。
   void bootstrap(ctx).catch((err) => {
-    console.error('[dsh-whale-arcade] 初始化失败（插件停用，不影响 DSH）：', err);
+    console.error('[dsh-whale-game] 初始化失败（插件停用，不影响 DSH）：', err);
   });
 }
 
 async function bootstrap(ctx: any): Promise<void> {
   const webServer = ctx.webServer;
   if (!webServer?.register) {
-    console.warn('[dsh-whale-arcade] 宿主没有 webServer 服务，启动器无法提供状态接口');
+    console.warn('[dsh-whale-game] 宿主没有 webServer 服务，启动器无法提供状态接口');
     return;
   }
 
@@ -359,7 +359,7 @@ async function bootstrap(ctx: any): Promise<void> {
     try {
       writeConfig(configFile, next);
     } catch (err) {
-      console.warn('[dsh-whale-arcade] 配置写入失败：', err);
+      console.warn('[dsh-whale-game] 配置写入失败：', err);
     }
   };
 

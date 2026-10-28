@@ -23,7 +23,7 @@ declare const window: Window & {
 };
 
 const NS = 'whale-arcade';
-const CSS_TAG = 'dsh-whale-arcade/panel.css';
+const CSS_TAG = 'dsh-whale-game/panel.css';
 const BUBBLE_ID = 'whale-arcade';
 
 function injectCss(): void {
@@ -53,7 +53,7 @@ export function makeFactory(): (require: (mod: string) => any) => any {
         ctx.locale.register(NS, { zh, en });
         t = ctx.locale.bind(NS) as (key: string) => string;
       } catch (error) {
-        console.warn('[dsh-whale-arcade] locale 不可用，退回内置文案：', error);
+        console.warn('[dsh-whale-game] locale 不可用，退回内置文案：', error);
       }
 
       const runtime: Omit<SectionRuntime, 'onClose'> = {
@@ -145,7 +145,7 @@ export function makeFactory(): (require: (mod: string) => any) => any {
 }
 
 if (typeof window !== 'undefined' && window.__ModuleLoader__) {
-  window.__ModuleLoader__.load({ id: 'dsh-whale-arcade', factory: makeFactory() });
+  window.__ModuleLoader__.load({ id: 'dsh-whale-game', factory: makeFactory() });
 } else {
-  console.warn('[dsh-whale-arcade] 没有找到 DSH 模块加载器，插件未注册');
+  console.warn('[dsh-whale-game] 没有找到 DSH 模块加载器，插件未注册');
 }

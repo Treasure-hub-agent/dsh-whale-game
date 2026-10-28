@@ -126,7 +126,7 @@ const fakeDocument = {
 vm.runInNewContext(clientSource, { window: fakeWindow, document: fakeDocument, console, setTimeout, clearTimeout });
 
 assert(loaded !== null, '调用了 __ModuleLoader__.load');
-assert(loaded?.id === 'dsh-whale-arcade', 'id 正确', loaded?.id);
+assert(loaded?.id === 'dsh-whale-game', 'id 正确', loaded?.id);
 
 const hookStub = (initial) => [typeof initial === 'function' ? initial() : initial, () => {}];
 const reactStub = {

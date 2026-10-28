@@ -1,7 +1,7 @@
 {
-  "name": "dsh-whale-arcade",
+  "name": "dsh-whale-game",
   "version": "0.1.0",
-  "description": "大肥鱼游戏厅 —— DeepSeek Harness 插件：一键起停本地游戏厅，点开就能和你的 Agent 玩一局",
+  "description": "大肥鱼游戏厅 —— DeepSeek Harness 插件：和你桌边的那个 Agent 一起玩六款小游戏",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -18,21 +18,21 @@
   ],
   "license": "MIT",
   "author": "Whale Arcade contributors",
-  "homepage": "https://github.com/Treasure-hub-agent/dsh-whale-arcade#readme",
+  "homepage": "https://github.com/Treasure-hub-agent/dsh-whale-game#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Treasure-hub-agent/dsh-whale-arcade.git"
+    "url": "git+https://github.com/Treasure-hub-agent/dsh-whale-game.git"
   },
   "bugs": {
-    "url": "https://github.com/Treasure-hub-agent/dsh-whale-arcade/issues"
+    "url": "https://github.com/Treasure-hub-agent/dsh-whale-game/issues"
   },
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",
-    "whale-arcade",
+    "whale-game",
     "ai-playground",
-    "launcher",
-    "game",
+    "board-game",
+    "human-vs-ai",
     "mcp",
     "agent-game"
   ],
