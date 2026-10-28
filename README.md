@@ -6,6 +6,7 @@
 
 六款小游戏，你和 DSH 里那个 Agent 同桌 —— 浏览器当牌桌，Agent 当对手，规则由引擎裁决
 
+[![npm](https://img.shields.io/npm/v/dsh-whale-game.svg)](https://www.npmjs.com/package/dsh-whale-game)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Games](https://img.shields.io/badge/games-6%20playable-fd9d2e.svg)](#六款游戏)
 [![DSH](https://img.shields.io/badge/dsh-%E2%89%A50.2.0--rc.1-6f42c1.svg)](package.json)
@@ -94,6 +95,7 @@ dsh plugin --profile desktop add dsh-whale-game
 装完**重启 DSH**，左侧栏底部会出现 🎮 大肥鱼游戏厅。
 
 > 包名是 `dsh-whale-game`（`dsh-whale-arcade` 已被另一个插件占用）。
+> 也可以在 <https://www.npmjs.com/package/dsh-whale-game> 看到它。
 
 ### 本地开发
 
