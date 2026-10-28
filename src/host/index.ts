@@ -20,7 +20,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_CONFIG,
   PLUGIN_VERSION,
@@ -95,18 +96,64 @@ function writeConfig(file: string, config: LauncherConfig): void {
 }
 
 /**
- * 启动命令的解析顺序（空配置时）：
- *   1. 环境变量 PLAYGROUND_CMD（给高级用户留的逃生口）
- *   2. 本机仓库里的 CLI（开发期最常用）
- *   3. npx —— 游戏厅发到 npm 之后这条路会自动可用
+ * 插件自带的游戏厅本体（`vendor/app/`，由 `node scripts/vendor-app.mjs` 从平台仓库同步）。
+ *
+ * 为什么要自带：新用户装完插件点「开启游戏厅」时，不该还要求他 clone 平台、装依赖、配命令。
+ * 这份产物是 esbuild 打好的零依赖单文件，`node dist/index.js serve` 直接能跑，
+ * 所以**零网络、无需 npm install、秒开**。
  */
-function resolveCommand(config: LauncherConfig): string {
-  if (config.command) return config.command;
+const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const VENDORED_APP_DIR = join(PACKAGE_ROOT, 'vendor', 'app');
+const VENDORED_APP_ENTRY = join(VENDORED_APP_DIR, 'dist', 'index.js');
+
+/** 插件里是否带了本体；带了的话顺手读出它的平台版本，界面上要显示。 */
+export function bundledAppInfo(): { available: boolean; version: string | null } {
+  if (!existsSync(VENDORED_APP_ENTRY)) return { available: false, version: null };
+  try {
+    const meta = readFileSync(join(VENDORED_APP_DIR, 'VENDORED.txt'), 'utf8');
+    const match = /platform version:\s*(\S+)/.exec(meta);
+    return { available: true, version: match?.[1] ?? null };
+  } catch {
+    return { available: true, version: null };
+  }
+}
+
+export interface LaunchSpec {
+  command: string;
+  /** 额外注入的环境变量（本体自带时要把 PLAYGROUND_WEB_DIST 指到包内） */
+  env: Record<string, string>;
+  /** 这次是从哪条路来的，界面上用来回答「本体从哪来的」 */
+  source: 'config' | 'env' | 'repo' | 'bundled' | 'npx';
+}
+
+/**
+ * 启动命令的解析顺序（配置为空时）：
+ *   1. 插件自带的本体（默认路径，零网络、无需安装）
+ *   2. 环境变量 PLAYGROUND_CMD（高级用户的逃生口）
+ *   3. 环境变量 AI_PLAYGROUND_REPO（指向平台源码，开发期用）
+ *   4. npx 兜底（万一包被裁剪掉了 vendor/）
+ */
+function resolveCommand(config: LauncherConfig): LaunchSpec {
+  if (config.command) return { command: config.command, env: {}, source: 'config' };
   const fromEnv = process.env.PLAYGROUND_CMD?.trim();
-  if (fromEnv) return fromEnv;
+  if (fromEnv) return { command: fromEnv, env: {}, source: 'env' };
   const localRepo = process.env.AI_PLAYGROUND_REPO?.trim();
-  if (localRepo) return `node "${join(localRepo, 'packages/cli/src/index.ts')}" serve`;
-  return 'npx --yes ai-playground@latest serve';
+  if (localRepo) {
+    return {
+      command: `node "${join(localRepo, 'packages/cli/src/index.ts')}" serve`,
+      env: {},
+      source: 'repo',
+    };
+  }
+  if (existsSync(VENDORED_APP_ENTRY)) {
+    return {
+      command: `node "${VENDORED_APP_ENTRY}" serve`,
+      // 自带本体的静态资源在包内；显式指过去，免得 CLI 自己算错
+      env: { PLAYGROUND_WEB_DIST: join(VENDORED_APP_DIR, 'web') },
+      source: 'bundled',
+    };
+  }
+  return { command: 'npx --yes ai-playground-cli@latest serve', env: {}, source: 'npx' };
 }
 
 class Supervisor {
@@ -115,6 +162,8 @@ class Supervisor {
   private startedAt: number | null = null;
   private error: string | null = null;
   private health: HealthInfo = { games: null, firstGame: null, latencyMs: null };
+  /** 上一次启动用的是哪条路（config / env / repo / bundled / npx），界面照它解释本体来源 */
+  private launchSource: LaunchSpec['source'] | null = null;
   private readonly logs: string[] = [];
   private healthTimer: NodeJS.Timeout | null = null;
 
@@ -159,6 +208,8 @@ class Supervisor {
       health: { ...this.health },
       logs: this.logs.slice(-80),
       pluginVersion: PLUGIN_VERSION,
+      platform: bundledAppInfo(),
+      launchSource: this.launchSource,
     };
   }
 
@@ -201,10 +252,12 @@ class Supervisor {
       return this.snapshot();
     }
 
-    const command = resolveCommand(this.config);
+    const launch = resolveCommand(this.config);
+    const command = launch.command;
+    this.launchSource = launch.source;
     const cwd = this.config.cwd || process.cwd();
     this.push(`$ ${command}`);
-    this.push(`  cwd: ${cwd}`);
+    this.push(`  cwd: ${cwd}  来源: ${launch.source}`);
 
     try {
       const child = spawn(command, {
@@ -212,7 +265,13 @@ class Supervisor {
         shell: true,
         windowsHide: true,
         detached: process.platform !== 'win32',
-        env: { ...process.env, PORT: String(this.config.port), HOST: '127.0.0.1', FORCE_COLOR: '0' },
+        env: {
+          ...process.env,
+          ...launch.env,
+          PORT: String(this.config.port),
+          HOST: '127.0.0.1',
+          FORCE_COLOR: '0',
+        },
       });
       this.child = child;
       child.stdout?.on('data', (chunk: Buffer) => this.push(chunk.toString()));

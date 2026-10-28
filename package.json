@@ -1,7 +1,7 @@
 {
   "name": "dsh-whale-game",
-  "version": "0.1.0",
-  "description": "大肥鱼游戏厅 —— DeepSeek Harness 插件：和你桌边的那个 Agent 一起玩六款小游戏",
+  "version": "0.1.1",
+  "description": "大肥鱼游戏厅 —— DeepSeek Harness 插件：内置六款小游戏，装完点开就能和你的 Agent 玩一局",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -12,6 +12,7 @@
   },
   "files": [
     "lib",
+    "vendor/app",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
@@ -46,7 +47,8 @@
     "typecheck": "tsc --noEmit",
     "smoke": "node scripts/smoke.mjs",
     "e2e": "node scripts/e2e-local.mjs",
-    "check": "node build.mjs && node scripts/smoke.mjs && tsc --noEmit"
+    "check": "node build.mjs && node scripts/smoke.mjs && tsc --noEmit",
+    "vendor": "node scripts/vendor-app.mjs"
   },
   "dsh": {
     "bundle": {

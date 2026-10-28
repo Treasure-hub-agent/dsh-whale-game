@@ -7,8 +7,9 @@
  *   node scripts/e2e-local.mjs <游戏厅仓库路径>
  *   AI_PLAYGROUND_REPO=<路径> node scripts/e2e-local.mjs
  *
- * 需要一个可用的 AI 游乐场源码目录（https://github.com/Treasure-hub-agent/ai-playground），
- * 因为它会真的 `node <repo>/packages/cli/src/index.ts serve` 起一次服务再关掉。
+ * 两种跑法：
+ *   node scripts/e2e-local.mjs            # 用插件自带的 vendor/app（默认路径，零网络）
+ *   node scripts/e2e-local.mjs <平台仓库>  # 用本机 AI 游乐场源码（AI_PLAYGROUND_REPO 亦可）
  */
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -16,9 +17,9 @@ import { join } from 'node:path';
 import net from 'node:net';
 
 const repo = process.argv[2] ?? process.env.AI_PLAYGROUND_REPO ?? '';
-if (!repo || !existsSync(join(repo, 'packages', 'cli', 'src', 'index.ts'))) {
-  console.error('用法：node scripts/e2e-local.mjs <AI 游乐场仓库路径>');
-  console.error('（或设置 AI_PLAYGROUND_REPO 环境变量）');
+const useRepo = Boolean(repo);
+if (useRepo && !existsSync(join(repo, 'packages', 'cli', 'src', 'index.ts'))) {
+  console.error(`给的平台仓库不像 AI 游乐场：${repo}`);
   process.exit(2);
 }
 const port = 8907;
@@ -86,8 +87,9 @@ console.log(`\n[e2e] repo=${repo} port=${port}`);
 // 1. 先把启动命令指向本机仓库，端口换成测试端口
 await call('PUT', '/whale-arcade/config', {
   port,
-  command: `node "${repo}/packages/cli/src/index.ts" serve`,
-  cwd: repo,
+  // 不给仓库路径时留空 → 走插件自带的 vendor/app（这才是新用户的默认体验）
+  command: useRepo ? `node "${repo}/packages/cli/src/index.ts" serve` : '',
+  cwd: useRepo ? repo : '',
   autoStart: false,
   openOnStart: false,
 });
@@ -98,6 +100,19 @@ assert(started.body?.state?.status === 'running', '启动后状态是 running', 
 assert(started.body?.state?.health?.games === 6, '健康检查探到 6 款游戏', String(started.body?.state?.health?.games));
 assert(started.body?.state?.url === `http://127.0.0.1:${port}/`, 'URL 正确', started.body?.state?.url);
 assert(typeof started.body?.state?.pid === 'number', '拿到了子进程 pid', String(started.body?.state?.pid));
+assert(
+  started.body?.state?.launchSource === (useRepo ? 'config' : 'bundled'),
+  `启动来源正确（${useRepo ? 'config' : 'bundled'}）`,
+  String(started.body?.state?.launchSource),
+);
+if (!useRepo) {
+  assert(started.body?.state?.platform?.available === true, '插件自带本体可用');
+  assert(
+    typeof started.body?.state?.platform?.version === 'string',
+    '自带本体版本可读',
+    String(started.body?.state?.platform?.version),
+  );
+}
 
 // 3. 停
 const stopped = await call('POST', '/whale-arcade/stop');

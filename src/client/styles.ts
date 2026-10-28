@@ -388,6 +388,15 @@ export const SECTION_CSS = `
 }
 .wa-logs:empty::after { content: '暂无日志'; color: #8698a8; }
 
+/* ── 本体来源提示：一行小字，回答「这东西从哪来的」 ───────────────────── */
+.wa-source {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--wa-ink-2);
+}
+.wa-source-icon { font-size: 11px; line-height: 1; filter: saturate(0.85); }
 /* ── 底部铭牌：像机身角落的出厂编号 ───────────────────────────────────── */
 .wa-plate {
   border-top: 1px solid rgba(43, 58, 74, 0.09);

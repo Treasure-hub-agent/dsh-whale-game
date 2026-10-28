@@ -94,6 +94,9 @@ dsh plugin --profile desktop add dsh-whale-game
 
 装完**重启 DSH**，左侧栏底部会出现 🎮 大肥鱼游戏厅。
 
+> **插件自带游戏厅本体**（`vendor/app`，六款游戏 + 网页 + 音频，约 14.6 MB），
+> 所以点开就能玩——不需要另外 clone 平台、装依赖或联网下载。包体积也因此是 13.4 MB。
+
 > 包名是 `dsh-whale-game`（`dsh-whale-arcade` 已被另一个插件占用）。
 > 也可以在 <https://www.npmjs.com/package/dsh-whale-game> 看到它。
 
@@ -105,15 +108,15 @@ cd dsh-whale-game && pnpm install && pnpm build
 dsh plugin --profile desktop add link:$(pwd)
 ```
 
-## 第一次用：告诉它游戏厅在哪
+## 想用自己的版本？（可选）
 
-点 **⚙ 运行设置** 填一次启动命令（三选一）：
+默认用的是插件里自带的本体，**不用配任何东西**。只有下面这些情况才需要展开 **⚙ 运行设置** 改启动命令：
 
 | 情况 | 启动命令 |
 |---|---|
 | 本机有游戏厅源码 | `node /path/to/ai-playground/packages/cli/src/index.ts serve` |
-| 游戏厅已发 npm | 留空即可（默认 `npx --yes ai-playground@latest serve`） |
-| 想固定版本 | `npx --yes ai-playground@0.1.0 serve` |
+| 想用 npm 上的版本 | `npx --yes ai-playground-cli@latest serve` |
+| 想固定某版 | `npx --yes ai-playground-cli@0.1.0 serve` |
 
 也可以用环境变量 `PLAYGROUND_CMD`、`AI_PLAYGROUND_REPO`（优先级高于配置文件）。
 配置存在 `$DSH_HOME/whale-arcade/config.json`。
@@ -150,7 +153,8 @@ dsh plugin --profile desktop add link:$(pwd)
 | 现象 | 多半是 |
 |---|---|
 | 侧栏没有 🎮 | 插件没装上或没重启 DSH；看 DevTools 控制台有无 `dsh-whale-game` 报错 |
-| 一直「正在拉起…」后失败 | 启动命令不对、端口被占，或游戏厅依赖没装（`pnpm install`） |
+| 一直「正在拉起…」后失败 | 端口被占；或你在 ⚙ 运行设置里改过命令且命令不对（清空即回到自带本体） |
+| 提示本体不可用 | 插件包被裁剪过（比如只装了 lib/）；重新 dsh plugin add dsh-whale-game |
 | 绿灯但打不开 | 端口填错了；改完记得点「保存」再重开 |
 | **DSH 起不来** | DSH 是全有或全无启动。从 profile 的依赖与 `dsh.profile.bundles` 里删掉 `dsh-whale-game`，`pnpm -C "$DSH_HOME/profiles/desktop" install`，再重启 |
 
@@ -161,9 +165,21 @@ dsh plugin --profile desktop add link:$(pwd)
 
 ```bash
 pnpm install
-pnpm check                            # 构建 + 10 项静态自检 + 类型检查
-pnpm e2e -- /path/to/ai-playground    # 真起一次服务 → 健康检查 → 停 → 验端口释放
+pnpm check          # 构建 + 10 项静态自检 + 类型检查
+pnpm e2e           # 用自带本体：真起服务 → 健康检查 → 停 → 验端口释放
+pnpm e2e -- /path/to/ai-playground    # 用本机平台源码跑同一条链路
 ```
+
+**本体怎么更新**：插件里的 `vendor/app/` 是从平台仓库同步来的构建产物（`dist` + `web`），不是手写代码。平台发新版后：
+
+```bash
+# 1. 平台仓库里先构建
+node scripts/pack-cli.mjs
+# 2. 回到本仓库，把产物搬进 vendor/app
+pnpm vendor -- ../ai-playground
+```
+
+`scripts/vendor-app.mjs` 会重写 `vendor/app/VENDORED.txt`，界面上的「本体 vX.Y.Z」就读它。
 
 两个产物格式不同，是 DSH 契约决定的：
 

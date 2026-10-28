@@ -8,12 +8,25 @@
  *   react 只能通过 `window.__ModuleLoader__` 的 factory(require) 取。
  */
 import { build } from 'esbuild';
-import { rmSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, rmSync, mkdirSync, readFileSync } from 'node:fs';
 
 rmSync('lib', { recursive: true, force: true });
 mkdirSync('lib', { recursive: true });
 
 const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+
+/**
+ * 发布前守卫：插件靠 `vendor/app/` 自带游戏厅本体，缺了它新用户点「开启游戏厅」就会失败。
+ * 开发期（pnpm build）只提醒，发布期（prepack）直接失败——宁可发不出去，也别发个用不了的包。
+ */
+if (!existsSync('vendor/app/dist/index.js')) {
+  const message = 'vendor/app 缺失：先跑 node scripts/vendor-app.mjs <平台仓库路径>';
+  if (process.env.npm_lifecycle_event === 'prepack') {
+    console.error(`\n✗ ${message}\n`);
+    process.exit(1);
+  }
+  console.warn(`\n⚠ ${message}（本次仅构建插件本体）\n`);
+}
 
 await build({
   entryPoints: ['src/host/index.ts'],

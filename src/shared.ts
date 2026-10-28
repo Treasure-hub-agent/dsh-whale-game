@@ -55,7 +55,14 @@ export interface LauncherState {
   logs: string[];
   /** 插件版本。 */
   pluginVersion: string;
+  /** 插件里自带的游戏厅本体（vendor/app）：装了就能直接用，不需要另外下载。 */
+  platform: { available: boolean; version: string | null };
+  /** 这次启动用的是哪条路；null = 还没启动过。 */
+  launchSource: LaunchSource | null;
 }
+
+/** 启动来源：自带本体 / 用户配置 / 环境变量 / 平台源码 / npx 兜底。 */
+export type LaunchSource = 'config' | 'env' | 'repo' | 'bundled' | 'npx';
 
 export const DEFAULT_CONFIG: LauncherConfig = {
   port: 8787,

@@ -202,6 +202,20 @@ export function makeSection(rt: SectionRuntime) {
       2,
     );
 
+    // 本体来源：默认是插件自带的 vendor/app（装了就能用），也允许用户改命令/环境变量
+    const platform = state?.platform;
+    const bundledLabel = platform?.available
+      ? `本体：内置${platform.version ? ` v${platform.version}` : ''}（开箱即用）`
+      : '本体：未内置，需在下方的运行设置里指定启动命令';
+    const sourceLabel: Record<string, string> = {
+      bundled: bundledLabel,
+      config: '本体：使用自定义启动命令',
+      env: '本体：来自环境变量 PLAYGROUND_CMD',
+      repo: '本体：来自平台源码目录（AI_PLAYGROUND_REPO）',
+      npx: '本体：通过 npx 拉取',
+    };
+    const sourceText = state?.launchSource ? sourceLabel[state.launchSource] ?? bundledLabel : bundledLabel;
+
     // ── 三块计分牌：游戏数 / 端口 / 运行时长 ──────────────────────────────
     const gamesValue = running && state?.health.games != null ? String(state.health.games) : '—';
     const portValue = String(state?.config.port ?? '—');
@@ -466,6 +480,7 @@ export function makeSection(rt: SectionRuntime) {
           cta,
           chips,
           toast ? h('div', { className: 'wa-notice' }, toast) : null,
+          h('div', { className: 'wa-source' }, h('span', { className: 'wa-source-icon' }, '📦'), h('span', null, sourceText)),
           configFold,
           logsFold,
           state?.pluginVersion
