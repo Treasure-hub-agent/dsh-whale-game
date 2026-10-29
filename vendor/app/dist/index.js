@@ -32028,15 +32028,29 @@ function buildLlmsTxt(opts) {
 \u5BA2\u6237\u7AEF\u914D\u7F6E\u793A\u4F8B\uFF08Claude Code \u98CE\u683C\uFF09\uFF1A
   claude mcp add --transport http ai-playground ${base}/mcp
 
+## \u26A0\uFE0F \u5148\u786E\u8BA4 MCP \u771F\u7684\u63A5\u4E0A\u4E86
+
+\u5982\u679C\u4F60\u5F53\u524D\u7684\u5DE5\u5177\u5217\u8868\u91CC**\u6CA1\u6709 playground_ \u5F00\u5934\u7684\u90A3\u7EC4\u5DE5\u5177**\uFF0C\u8BF4\u660E MCP \u8FD8\u6CA1\u63A5\u4E0A\uFF1A
+\u5148\u7528\u4E0A\u9762\u90A3\u6761\u547D\u4EE4\u628A\u7AEF\u70B9\u52A0\u8FDB\u5BA2\u6237\u7AEF\uFF0C\u518D\u5F00\u59CB\u5BF9\u5C40\u3002
+
+**\u4E0D\u8981\u7528 curl / PowerShell \u624B\u6413 JSON-RPC**\u3002\u80FD\u8DD1\u901A\uFF0C\u4F46\u4F60\u4F1A\u5931\u53BB\u5BA2\u6237\u7AEF\u4FA7\u7684\u4EE4\u724C\u7BA1\u7406\uFF0C
+\u53EA\u80FD\u731C\u4EE4\u724C\u8BE5\u653E\u54EA\u3001\u5E76\u53CD\u590D\u8BD5\u63A2\u63A5\u53E3\u5F62\u72B6\u2014\u2014\u6574\u5C40\u7684\u65F6\u95F4\u90FD\u4F1A\u8017\u5728\u8FD9\u4E0A\u9762\uFF0C\u800C\u4EBA\u7C7B\u5728\u724C\u684C\u4E0A\u7B49\u7740\u3002
+
+## \u26A0\uFE0F \u5BF9\u5C40\u793C\u4EEA
+
+\u6309\u56DE\u5408\u51FA\u62DB\uFF1A\u8BFB\u5230 legalActions \u5C31\u51FA\u4E00\u624B\uFF0C\u7136\u540E wait_for_turn\u3002
+**\u4E0D\u8981\u5199\u81EA\u52A8\u5BF9\u5C40\u811A\u672C\u628A\u6574\u5C40\u6258\u7BA1\u6389**\u2014\u2014\u4EBA\u7C7B\u8981\u7684\u662F\u300C\u548C\u4F60\u540C\u684C\u73A9\u300D\uFF0C\u4E0D\u662F\u770B\u4F60\u628A\u68CB\u4E0B\u5B8C\u3002
+
 ## \u5E2D\u4F4D\u4E0E\u4EE4\u724C\uFF08\u7B2C 12 \u8F6E\u65B0\u589E\uFF0C\u5FC5\u8BFB\uFF09
 
 - \u6BCF\u4E2A\u5EA7\u4F4D\u4E00\u679A\u4EE4\u724C\uFF1A32 \u4F4D\u5C0F\u5199\u5341\u516D\u8FDB\u5236\uFF0816 \u5B57\u8282\u968F\u673A\u6570\uFF09\uFF0C\u5B58\u5728\u623F\u95F4\u7684 seatTokens[seat] \u91CC\u3002
 - 0 \u53F7\u4F4D\uFF08\u4EBA\u7C7B\uFF09\uFF1APOST /api/rooms \u65F6\u751F\u6210\u5E76**\u9884\u7559**\uFF0C\u54CD\u5E94\u91CC\u6709 seatTokens["0"]\uFF1BhumanUrl \u4E5F\u5E26\u540C\u4E00\u4E2A token\u3002
 - 1 \u53F7\u4F4D\uFF08Agent\uFF09\uFF1APOST /api/rooms/{roomId}/join {"seat":1} \u2192 \u54CD\u5E94 {ok, seat, token, ...}\u3002**\u628A token \u5B58\u597D**\uFF0C\u4E22\u4E86\u5C31\u7B49\u4E8E\u4E22\u5EA7\u4F4D\u3002
-- \u4E4B\u540E\u6BCF\u6B21\u8BF7\u6C42\u90FD\u5E26\u4EE4\u724C\uFF1A
+- \u4E4B\u540E\u6BCF\u6B21\u8BF7\u6C42\u90FD\u5E26\u4EE4\u724C\uFF08\u4E09\u79CD\u653E\u6CD5\u4EFB\u9009\uFF0C\u4F18\u5148\u7EA7\uFF1A\u8BF7\u6C42\u4F53 > \u67E5\u8BE2\u4E32 > \u8BF7\u6C42\u5934\uFF09\uFF1A
   - \u8BFB\u89C2\u6D4B\uFF1AGET /api/rooms/{roomId}/state?seat=1&token=<t>
   - \u51FA\u62DB\uFF1APOST /api/rooms/{roomId}/action {"seat":1,"action":{...},"token":"<t>"}
   - \u8BF4\u8BDD\uFF1APOST /api/rooms/{roomId}/say {"seat":1,"text":"...","token":"<t>"}
+  - \u6216\u8005\u7EDF\u4E00\u653E\u8FDB\u8BF7\u6C42\u5934 X-Seat-Token: <t>\uFF08\u4E0D\u60F3\u628A\u51ED\u636E\u5199\u8FDB URL \u4E0E\u8BBF\u95EE\u65E5\u5FD7\u65F6\u7528\u5B83\uFF09
 - \u4E0D\u5E26\u4EE4\u724C\u4E5F\u80FD\u8BFB\uFF0C\u4F46\u4F1A**\u964D\u7EA7\u4E3A\u65C1\u89C2**\uFF1Aspectator=true\u3001seat=null\u3001legalActions=[]\uFF0C\u53EA\u7ED9\u516C\u5F00\u4FE1\u606F\u3002\u8FD9\u662F\u7ED9\u56F4\u89C2\u670B\u53CB\u7684\u6B63\u5F53\u573A\u666F\uFF0C\u4E0D\u662F\u9519\u8BEF\u3002
 - \u4E0D\u5E26\u4EE4\u724C / \u4EE4\u724C\u4E0D\u5BF9\u53BB\u51FA\u62DB\uFF1A403 {"error":"seat_token_required"}\u3002\u65C1\u89C2\u53EF\u4EE5\u770B\uFF0C\u4F46\u4E0D\u80FD\u51FA\u624B\u3002
 - \u5EA7\u4F4D\u5DF2\u88AB\u5360\uFF080 \u53F7\u4F4D\u4ECE\u5EFA\u684C\u8D77\u5C31\u9884\u7559\uFF09\uFF0C\u53C8\u62FF\u4E0D\u51FA\u539F\u4EE4\u724C\uFF1A409 {"error":"seat_taken"}\u3002
@@ -32044,6 +32058,10 @@ function buildLlmsTxt(opts) {
 - GET /api/rooms/{id}\uFF08summary\uFF09\u3001GET .../log\u3001WebSocket \u4E8B\u4EF6\u90FD\u662F\u516C\u5F00\u7684\uFF1Bsummary **\u4E0D\u4F1A**\u8FD4\u56DE\u4EE4\u724C\uFF0C\u522B\u53BB\u90A3\u91CC\u627E\u3002
 
 ## \u5907\u9009\uFF1A\u76F4\u63A5\u7528 REST
+
+> \u5F62\u72B6\u63D0\u9192\uFF1AREST \u7684 /state **\u76F4\u63A5\u8FD4\u56DE\u89C2\u6D4B\u5BF9\u8C61\u672C\u8EAB**\uFF08\u6CA1\u6709\u5916\u5C42\u5305\u88C5\uFF0C\u5B57\u6BB5\u5C31\u5728\u9876\u5C42\uFF09\uFF1B
+> MCP \u7684 playground_get_state \u5219\u662F\u7ED3\u6784\u5316\u7684 { structuredContent: {...\u89C2\u6D4B} }\u3002
+> \u522B\u62FF\u540C\u4E00\u4E2A .observation \u53BB\u5957\u4E24\u8FB9\u2014\u2014\u6309\u54EA\u4E2A\u63A5\u53E3\u53D6\uFF0C\u5C31\u6309\u54EA\u4E2A\u5F62\u72B6\u89E3\u6790\u3002
 
 - \u6E38\u620F\u4E0E\u89C4\u5219\uFF1AGET ${base}/api/games
 - \u5F00\u684C\uFF1APOST ${base}/api/rooms  {"gameId":"grab"}  \u2192 \u8FD4\u56DE roomId\u3001humanUrlPath\u3001seatTokens["0"]
@@ -32188,6 +32206,14 @@ function sendError(res, err, extra = {}) {
 function readToken(value) {
   return typeof value === "string" && value.length > 0 ? value : void 0;
 }
+function tokenFrom(req, ...candidates) {
+  for (const candidate of candidates) {
+    const token = readToken(candidate);
+    if (token) return token;
+  }
+  const header = req.headers["x-seat-token"];
+  return readToken(Array.isArray(header) ? header[0] : header);
+}
 function routeParts(pathname) {
   return pathname.split("/").filter(Boolean);
 }
@@ -32277,7 +32303,7 @@ async function handleApi(req, res, parts) {
         const joined = rooms.join(
           roomId,
           parseSeat(body.seat, { required: true }),
-          readToken(body.token)
+          tokenFrom(req, body.token)
         );
         json2(res, 200, {
           ok: true,
@@ -32294,7 +32320,7 @@ async function handleApi(req, res, parts) {
       const params = new URL(req.url ?? "/", "http://x").searchParams;
       const seat = parseSeat(params.get("seat"), { required: false });
       try {
-        json2(res, 200, rooms.observation(roomId, seat, readToken(params.get("token"))));
+        json2(res, 200, rooms.observation(roomId, seat, tokenFrom(req, params.get("token"))));
       } catch (err) {
         sendError(res, err);
       }
@@ -32307,7 +32333,7 @@ async function handleApi(req, res, parts) {
           roomId,
           parseSeat(body.seat, { required: true }),
           body.action ?? {},
-          readToken(body.token)
+          tokenFrom(req, body.token)
         );
         if (result.error) {
           json2(res, 409, { ok: false, error: result.error, legalActions: result.legalActions ?? [] });
@@ -32326,7 +32352,7 @@ async function handleApi(req, res, parts) {
           roomId,
           parseSeat(body.seat, { required: true }),
           String(body.text ?? ""),
-          readToken(body.token)
+          tokenFrom(req, body.token)
         );
         json2(res, 200, { ok: true, message });
       } catch (err) {
