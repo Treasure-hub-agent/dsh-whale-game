@@ -102,6 +102,12 @@ function cellToText(c) {
   if (c.k === "bomb") return " \u{1F4A3} ";
   return " \u7A7A ";
 }
+function coordText(coord) {
+  if (!Array.isArray(coord) || coord.length !== 2) return "\uFF08\u65E0\uFF09";
+  const [r, c] = coord;
+  const letter = "ABC"[c] ?? "?";
+  return `[${r},${c}]\uFF08${letter}${r + 1}\uFF09`;
+}
 function allCoords() {
   const out = [];
   for (let r = 0; r < SIZE; r++) for (let c = 0; c < SIZE; c++) out.push([r, c]);
@@ -121,11 +127,26 @@ function buildTextView(state, seat) {
     lines.push(`\u7B2C ${r} \u884C: ` + row.map(cellToText).join("|"));
   });
   lines.push("\u5750\u6807\u683C\u5F0F [\u884C,\u5217]\uFF0C\u4F8B\u5982 [0,2] \u8868\u793A\u7B2C 0 \u884C\u7B2C 2 \u5217\u3002");
+  const last = played > 0 ? state.history[played - 1] : null;
+  if (last) {
+    const pickText = (s) => coordText(last.picks[s]);
+    const deltaOf = (s) => last.delta[s] ?? 0;
+    if (spectator) {
+      lines.push(
+        last.collision ? `\u{1F4A5} \u4E0A\u4E00\u56DE\u5408\u649E\u8F66\uFF1A\u5EA7\u4F4D 0 \u4E0E\u5EA7\u4F4D 1 \u90FD\u62A2\u4E86 ${pickText(0)}\uFF0C\u5B9D\u7269\u649E\u98DE\uFF0C\u53CC\u65B9 0 \u5206\u3002` : `\u4E0A\u4E00\u56DE\u5408\uFF1A\u5EA7\u4F4D 0 \u2192 ${pickText(0)}\uFF08${deltaOf(0) >= 0 ? "+" : ""}${deltaOf(0)}\uFF09 \xB7 \u5EA7\u4F4D 1 \u2192 ${pickText(1)}\uFF08${deltaOf(1) >= 0 ? "+" : ""}${deltaOf(1)}\uFF09`
+      );
+    } else {
+      const mine = last.collision ? "\u649E\u8F66" : deltaOf(viewer) >= 0 ? `+${deltaOf(viewer)}` : `${deltaOf(viewer)}`;
+      lines.push(
+        last.collision ? `\u{1F4A5} \u4E0A\u4E00\u56DE\u5408\u649E\u8F66\uFF1A\u4F60\u548C\u5BF9\u624B\u90FD\u62A2\u4E86 ${pickText(viewer)}\uFF0C\u5B9D\u7269\u649E\u98DE\uFF0C\u672C\u56DE\u5408\u53CC\u65B9 0 \u5206\u3002` : `\u4E0A\u4E00\u56DE\u5408\uFF1A\u4F60 \u2192 ${pickText(viewer)}\uFF08${mine}\uFF09\uFF0C\u5BF9\u624B \u2192 ${pickText(opponent)}\uFF08${deltaOf(opponent) >= 0 ? "+" : ""}${deltaOf(opponent)}\uFF09`
+      );
+    }
+  }
   if (ended) {
     const s0 = state.scores[0];
     const s1 = state.scores[1];
     const verdict = s0 === s1 ? `\u5E73\u5C40\uFF08${s0} : ${s1}\uFF09` : `${s0 > s1 ? "\u5EA7\u4F4D 0" : "\u5EA7\u4F4D 1"} \u83B7\u80DC\uFF08${s0} : ${s1}\uFF09`;
-    lines.push(`\u{1F3C1} \u5BF9\u5C40\u5DF2\u7ED3\u675F\uFF1A${verdict}\u3002\u53EF\u8C03\u7528 get_result / export_log \u67E5\u770B\u7ED3\u7B97\u4E0E\u590D\u76D8\u3002`);
+    lines.push(`\u{1F3C1} \u5BF9\u5C40\u5DF2\u7ED3\u675F\uFF1A${verdict}\u3002\uFF08Agent \u53EF\u7528 get_result / export_log \u590D\u76D8\uFF09`);
   } else if (spectator) {
     lines.push("\u5BF9\u5C40\u8FDB\u884C\u4E2D\uFF1A\u53CC\u65B9\u672C\u56DE\u5408\u6B63\u5728\u540C\u65F6\u6697\u9009\uFF0C\u65C1\u89C2\u89C6\u56FE\u770B\u4E0D\u5230\u672A\u7ED3\u7B97\u7684\u843D\u70B9\u3002");
   } else {
@@ -32057,6 +32078,41 @@ function wakeConfigFromEnv(env = process.env) {
   if (!url) return null;
   return { url, secret: env.WAKE_SECRET?.trim() ?? "" };
 }
+async function probeWakeable(sessionId, options = {}) {
+  const config2 = wakeConfigFromEnv(options.env);
+  if (config2 === null) return { wakeable: null };
+  const url = `${config2.url.replace(/\/+$/, "")}/check`;
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json; charset=utf-8", "x-wake-secret": config2.secret },
+      body: JSON.stringify({ sessionId }),
+      signal: AbortSignal.timeout(1500)
+    });
+    const text = await response.text().catch(() => "");
+    if (!response.ok) return { wakeable: null };
+    let body;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      return { wakeable: null };
+    }
+    const record2 = body;
+    if (typeof record2?.wakeable !== "boolean") return { wakeable: null };
+    return {
+      wakeable: record2.wakeable,
+      reason: typeof record2.reason === "string" ? record2.reason : void 0
+    };
+  } catch {
+    return { wakeable: null };
+  }
+}
+async function assertWakeable(sessionId, options = {}) {
+  const probe = await probeWakeable(sessionId, options);
+  if (probe.wakeable === false) {
+    throw new SessionUnwakeableError(sessionId, probe.reason ?? "\u63D2\u4EF6\u62A5\u544A\u4E0D\u53EF\u5524\u9192");
+  }
+}
 function sleep2(ms) {
   return new Promise((resolve4) => setTimeout(resolve4, ms));
 }
@@ -32284,7 +32340,7 @@ function scheduleRoomEndWake(room, options = {}) {
   const payload2 = buildPayload(room, round, textView, room.wake.sessionId, "ended", resultText);
   dispatchWake(room, config2, payload2, `${room.id}:ended`, options, 1);
 }
-var WAKE_TIMEOUT_MS, WAKE_RETRY_DELAY_MS, WAKE_DEDUPE_MS, WAKE_MAX_PER_ROUND, WAKE_LOG_LIMIT, MAX_TEXT_VIEW_CHARS, wakeLog, dedupe, inFlight, retryTimers, warnedMissingSecret, DEFAULT_RETRY_DELAYS_MS;
+var WAKE_TIMEOUT_MS, WAKE_RETRY_DELAY_MS, WAKE_DEDUPE_MS, WAKE_MAX_PER_ROUND, WAKE_LOG_LIMIT, MAX_TEXT_VIEW_CHARS, SessionUnwakeableError, wakeLog, dedupe, inFlight, retryTimers, warnedMissingSecret, DEFAULT_RETRY_DELAYS_MS;
 var init_wake = __esm({
   "packages/server/src/wake.ts"() {
     "use strict";
@@ -32294,6 +32350,17 @@ var init_wake = __esm({
     WAKE_MAX_PER_ROUND = 2;
     WAKE_LOG_LIMIT = 50;
     MAX_TEXT_VIEW_CHARS = 4096;
+    SessionUnwakeableError = class extends Error {
+      constructor(sessionId, reason) {
+        super(`\u4F1A\u8BDD ${sessionId} \u65E0\u6CD5\u88AB\u5524\u9192\uFF1A${reason}`);
+        this.sessionId = sessionId;
+        this.reason = reason;
+        this.name = "SessionUnwakeableError";
+      }
+      sessionId;
+      reason;
+      code = "session-unwakeable";
+    };
     wakeLog = [];
     dedupe = /* @__PURE__ */ new WeakMap();
     inFlight = /* @__PURE__ */ new Set();
@@ -32631,6 +32698,7 @@ function statusOf(err) {
   if (err instanceof SeatTokenRequiredError) return 403;
   if (err instanceof SeatTakenError) return 409;
   const msg = String(err?.message ?? "");
+  if (err instanceof SessionUnwakeableError) return 409;
   if (/seat|sessionId|文本|太快|未知游戏|JSON/.test(msg)) return 400;
   if (/房间不存在/.test(msg)) return 404;
   return 500;
@@ -32644,6 +32712,10 @@ function errorBody(err) {
   if (err instanceof SeatTokenRequiredError || err instanceof SeatTakenError) {
     const explained = explainError(err.code);
     return { error: err.code, ...explained, message: err.message || explained.message };
+  }
+  if (err instanceof SessionUnwakeableError) {
+    const explained = explainError(err.code);
+    return { error: err.code, message: err.message || explained.message, next: explained.next };
   }
   const raw = String(err?.message ?? err);
   return { error: raw, message: raw };
@@ -32720,7 +32792,10 @@ async function handleApi(req, res, parts) {
     try {
       const sessionId = body.sessionId === void 0 ? null : normalizeSessionId(body.sessionId);
       const room = rooms.create(gameId);
-      if (sessionId !== null) rooms.bindWake(room.id, sessionId);
+      if (sessionId !== null) {
+        await assertWakeable(sessionId);
+        rooms.bindWake(room.id, sessionId);
+      }
       notifyAgentTurn(room.id);
       const humanToken = room.seatTokens[0];
       json2(res, 200, {
@@ -32756,7 +32831,10 @@ async function handleApi(req, res, parts) {
         const seat = parseSeat(body.seat, { required: true });
         const sessionId = body.sessionId === void 0 ? null : normalizeSessionId(body.sessionId);
         const joined = rooms.join(roomId, seat, tokenFrom(req, body.token));
-        if (sessionId !== null) rooms.bindWake(roomId, sessionId);
+        if (sessionId !== null) {
+          await assertWakeable(sessionId);
+          rooms.bindWake(roomId, sessionId);
+        }
         notifyAgentTurn(roomId);
         json2(res, 200, {
           ok: true,
@@ -32772,7 +32850,9 @@ async function handleApi(req, res, parts) {
     if (method === "POST" && sub === "bind") {
       const body = await readBody(req);
       try {
-        const binding = rooms.bindWake(roomId, normalizeSessionId(body.sessionId));
+        const bindSessionId = normalizeSessionId(body.sessionId);
+        await assertWakeable(bindSessionId);
+        const binding = rooms.bindWake(roomId, bindSessionId);
         notifyAgentTurn(roomId);
         json2(res, 200, {
           ok: true,
@@ -33167,6 +33247,10 @@ var init_server3 = __esm({
       room_not_found: {
         message: "\u6CA1\u6709\u8FD9\u4E2A\u623F\u95F4\uFF08\u53EF\u80FD\u623F\u95F4\u53F7\u5199\u9519\uFF0C\u6216\u5DF2\u88AB\u6E05\u7406\uFF09\u3002",
         next: "\u7528 playground_create_room \u5F00\u65B0\u684C\u3002"
+      },
+      "session-unwakeable": {
+        message: "\u8FD9\u4E2A\u4F1A\u8BDD\u53EB\u4E0D\u9192\uFF08\u901A\u5E38\u662F\u5B50\u4EE3\u7406 / \u56E2\u961F\u6210\u5458\u4F1A\u8BDD\uFF0CDSH \u4E0D\u5141\u8BB8\u5916\u90E8\u5524\u9192\u5B83\uFF09\u3002",
+        next: "\u6539\u7528\u4E3B\u4F1A\u8BDD\u5F00\u684C\uFF08\u4EBA\u7C7B\u81EA\u5DF1\u5F00\u7684\u90A3\u4E2A\u4F1A\u8BDD\uFF09\uFF0C\u6216\u4E0D\u8981\u7ED1\u5B9A\u4F1A\u8BDD\u3001\u6539\u7528 wait_for_turn \u8F6E\u8BE2\u3002"
       }
     };
   }

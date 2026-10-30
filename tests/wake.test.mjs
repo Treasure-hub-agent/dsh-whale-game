@@ -343,3 +343,54 @@ test('payload 校验：reason 只认 ended，其余脏值一律按 turn', () => 
   assert.equal(validateWakePayload({ roomId: 'r1', sessionId: 's1', reason: 'hack' }).payload.reason, 'turn');
   assert.equal(validateWakePayload({ roomId: 'r1', sessionId: 's1' }).payload.reason, 'turn');
 });
+
+// ─────────── 可唤醒性预检 /whale-arcade/wake/check（第 18 轮） ───────────
+
+test('check：主会话可唤醒 → wakeable:true，且**不投递**任何消息', async () => {
+  const svc = makeWakeServices();
+  const { route, cleanup } = await boot({ services: svc.services });
+  try {
+    const res = await callRoute(route, 'POST', '/whale-arcade/wake/check', {
+      body: { sessionId: 'session-ok' },
+      headers: { 'x-wake-secret': SECRET },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.wakeable, true);
+    assert.equal(svc.delivered.length, 0, 'check 只问不投，不能往会话里塞消息');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('check：subagent 会话 → 200 + wakeable:false + reason（平台据此婉拒，而不是等落子才发现）', async () => {
+  const svc = makeWakeServices({ resolveError: new Error('session "x" is owned by subagent routing') });
+  const { route, cleanup } = await boot({ services: svc.services });
+  try {
+    const res = await callRoute(route, 'POST', '/whale-arcade/wake/check', {
+      body: { sessionId: 'session-sub' },
+      headers: { 'x-wake-secret': SECRET },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.wakeable, false);
+    assert.match(String(res.body.reason), /subagent routing/);
+    assert.equal(svc.delivered.length, 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('check：鉴权与形状校验和 /wake 一致（缺密钥 401、坏 sessionId 400）', async () => {
+  const svc = makeWakeServices();
+  const { route, cleanup } = await boot({ services: svc.services });
+  try {
+    const noSecret = await callRoute(route, 'POST', '/whale-arcade/wake/check', { body: { sessionId: 's1' }, headers: {} });
+    assert.equal(noSecret.status, 401);
+    const badId = await callRoute(route, 'POST', '/whale-arcade/wake/check', {
+      body: { sessionId: 'has space' },
+      headers: { 'x-wake-secret': SECRET },
+    });
+    assert.equal(badId.status, 400);
+  } finally {
+    await cleanup();
+  }
+});

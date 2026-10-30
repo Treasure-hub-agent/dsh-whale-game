@@ -799,6 +799,17 @@ async function bootstrap(ctx: any): Promise<void> {
           json(res, result.status, result.body);
           return;
         }
+        // 可唤醒性预检（第 18 轮）：平台在 bind 时先问一句「这个会话叫得动吗」，
+        // 叫不动就当场婉拒，别等人类落子才发现 409。
+        if (action === 'wake/check') {
+          const result = await wakeBridge.check({
+            method,
+            headers: req.headers ?? {},
+            rawBody: method === 'POST' ? await readBody(req) : '',
+          });
+          json(res, result.status, result.body);
+          return;
+        }
         json(res, 404, { ok: false, error: `未知道路：${method} ${action}` });
       } catch (err) {
         json(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) });

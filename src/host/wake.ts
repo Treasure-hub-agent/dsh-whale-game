@@ -396,6 +396,56 @@ export class WakeBridge {
     return { ok: true, messageId };
   }
 
+  /**
+   * 可唤醒性预检（第 18 轮）：**只问不投**。
+   *
+   * 为什么需要：绑定一个「属于 subagent routing」的会话时，平台会一直以为绑定成功，
+   * 直到人类落子才发现 409（本次真实测试波三个测试员全踩）。让平台在 bind 时先问一句，
+   * 就能当场婉拒，而不是等人坐到牌桌前。
+   */
+  async check(request: { method: string; headers: unknown; rawBody: string }): Promise<WakeHttpResult> {
+    const method = request.method.toUpperCase();
+    if (method !== 'POST') return this.fail(405, 'bad-request', `只接受 POST，收到 ${method}`);
+
+    const expected = this.options.secret();
+    const provided = readWakeSecret(request.headers);
+    if (!expected) return this.fail(401, 'bad-secret', '插件还没生成唤醒密钥');
+    if (!provided) return this.fail(401, 'bad-secret', '缺少 x-wake-secret 请求头');
+    if (!secretEquals(provided, expected)) return this.fail(401, 'bad-secret', 'x-wake-secret 不匹配');
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(request.rawBody || '{}');
+    } catch (error) {
+      return this.fail(400, 'bad-request', `body 不是合法 JSON：${describeError(error)}`);
+    }
+    const sessionId = (parsed as { sessionId?: unknown })?.sessionId;
+    if (typeof sessionId !== 'string' || !ID_PATTERN.test(sessionId)) {
+      return this.fail(400, 'bad-request', 'sessionId 必须是 [A-Za-z0-9._:-]{1,128}', { field: 'sessionId' });
+    }
+
+    const services = this.options.services();
+    if (!services) {
+      // 宿主没装 sessionController：现在叫不了，但可能是插件还没注入好 —— 报 available=false 而不是 throw。
+      return { status: 200, body: { ok: true, wakeable: false, reason: '宿主没有 sessionController/sessions 服务', phase: 'services' } };
+    }
+    try {
+      const resolved = await services.sessionController.resolveAgent(sessionId);
+      if (resolved?.error) {
+        return {
+          status: 200,
+          body: { ok: true, wakeable: false, reason: describeError(resolved.error), phase: 'resolve' },
+        };
+      }
+      if (!resolved?.agent) {
+        return { status: 200, body: { ok: true, wakeable: false, reason: 'resolveAgent 没有返回 agent', phase: 'resolve' } };
+      }
+      return { status: 200, body: { ok: true, wakeable: true } };
+    } catch (error) {
+      return { status: 200, body: { ok: true, wakeable: false, reason: describeError(error), phase: 'resolve' } };
+    }
+  }
+
   /** 主入口：鉴权 → 校验 → 去抖 → 投递（含一次安全的 kind 降级）。 */
   async handle(request: { method: string; headers: unknown; rawBody: string }): Promise<WakeHttpResult> {
     const method = request.method.toUpperCase();
@@ -506,3 +556,4 @@ export class WakeBridge {
     }
   }
 }
+
