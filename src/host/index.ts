@@ -320,6 +320,30 @@ class Supervisor {
     });
   }
 
+  /**
+   * 空闲态顺手探活（第 17 轮，修「状态自相矛盾」）。
+   *
+   * 场景：插件起的厅被外部杀掉、之后又有人手动起了一个（或主人自己 `node ... serve`），
+   * 此时 supervisor 状态停在 `stopped`，但端口上其实有实例——面板/状态接口就会
+   * 一边显示「已停止」一边服务可用，排查时非常误导。
+   *
+   * 只做**只读探测**：探通就按 external 记账（不接管、不 kill）；探不通保持原状。
+   */
+  async refreshIdle(): Promise<void> {
+    if (this.status !== 'stopped' && this.status !== 'failed') return;
+    const health = await this.probeHealth();
+    if (health.games === null) return;
+    this.status = 'running';
+    this.owner = 'external';
+    this.health = health;
+    this.startedAt = null;
+    this.launchSource = null;
+    this.notice =
+      this.notice ?? `端口 ${this.config.port} 上已有一个游戏厅在跑（不是插件起的）：插件按外部实例对待，不负责停止它。`;
+    this.startHealthPolling();
+    this.push(`[external] 端口 ${this.config.port} 探活成功（${health.games} 款游戏），按外部实例对待`);
+  }
+
   private async probeHealth(): Promise<HealthInfo> {
     const started = Date.now();
     try {
@@ -728,6 +752,9 @@ async function bootstrap(ctx: any): Promise<void> {
 
       try {
         if (method === 'GET' && (action === 'status' || action === '')) {
+          // 第 17 轮：空闲态顺手探活。否则会出现「面板说已停止，端口上其实有实例」的自相矛盾
+          //（典型场景：插件起的厅被外部杀掉，之后主人又手动起了一个）。
+          await supervisorRef.refreshIdle();
           json(res, 200, { ok: true, state: supervisorRef.snapshot() });
           return;
         }

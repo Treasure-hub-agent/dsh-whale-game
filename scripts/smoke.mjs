@@ -56,7 +56,7 @@ process.env.DSH_HOME = dataHome;
 mkdirSync(join(dataHome, 'whale-arcade'), { recursive: true });
 writeFileSync(
   join(dataHome, 'whale-arcade', 'config.json'),
-  JSON.stringify({ port: 8787, autoStart: false }),
+  JSON.stringify({ port: 18087, autoStart: false }),
   'utf8',
 );
 
@@ -97,7 +97,7 @@ if (route) {
   const status = await call('GET', '/whale-arcade/status');
   assert(status.status === 200 && status.body?.ok === true, 'GET /status 200');
   assert(status.body?.state?.status === 'stopped', '初始状态是 stopped', status.body?.state?.status);
-  assert(status.body?.state?.url === 'http://127.0.0.1:8787/', '默认地址是 8787', status.body?.state?.url);
+  assert(status.body?.state?.url === 'http://127.0.0.1:18087/', '默认地址是隔离端口 18087', status.body?.state?.url);
 
   const save = await call('PUT', '/whale-arcade/config', { port: 8899, command: 'echo hi', autoStart: false });
   assert(save.status === 200 && save.body?.config?.port === 8899, 'PUT /config 保存端口', JSON.stringify(save.body?.config));
@@ -106,7 +106,12 @@ if (route) {
   assert(status2.body?.state?.url === 'http://127.0.0.1:8899/', '保存后地址跟着变', status2.body?.state?.url);
 
   const reject = await call('PUT', '/whale-arcade/config', { port: 80 });
-  assert(reject.body?.config?.port === 8787, '非法端口回落到默认', reject.body?.config?.port);
+  // 非法端口的兜底是 DEFAULT_CONFIG.port（8787），不是「上一次的端口」——这是产品既定行为。
+  assert(reject.body?.config?.port === 8787, '非法端口回落到默认 8787', reject.body?.config?.port);
+
+  // 立刻把端口挪回隔离口：8787 在本机可能真有个游戏厅在跑，
+  // 而 GET /status 现在会顺手探活（第 17 轮），会把那个实例认成 external —— 断言就不稳了。
+  await call('PUT', '/whale-arcade/config', { port: 18087, autoStart: false });
 
   const nope = await call('GET', '/whale-arcade/nope');
   assert(nope.status === 404, '未知路由 404');
@@ -244,3 +249,4 @@ rmSync(join(dataHome), { recursive: true, force: true });
 
 console.log(failed === 0 ? '\n✅ 自检全部通过' : `\n❌ ${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);
+
