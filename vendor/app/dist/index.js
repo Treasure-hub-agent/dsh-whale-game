@@ -673,15 +673,17 @@ function buildYachtTextView(state, seat) {
   const lines = [];
   const turnNote = ended ? "\u5BF9\u5C40\u7ED3\u675F" : spectator ? `\u8F6E\u5230\u5EA7\u4F4D ${current}` : current === seat ? "\u8F6E\u5230\u4F60\u4E86" : `\u8F6E\u5230\u5EA7\u4F4D ${current}`;
   lines.push(
-    `${spectator ? "\u65C1\u89C2\u89C6\u56FE \xB7 " : ""}\u5FEB\u8247\u9AB0\u5B50 \xB7 \u7B2C ${hand}/${YACHT_ROUNDS_TOTAL} \u624B \xB7 \u5269 ${state.rollsLeft} \u6B21\u63B7\u9AB0 \xB7 ${turnNote}`
+    `${spectator ? "\u65C1\u89C2\u89C6\u56FE \xB7 " : ""}\u5FEB\u8247\u9AB0\u5B50 \xB7 ${ended ? `\u5171 ${YACHT_ROUNDS_TOTAL} \u624B` : `\u7B2C ${hand}/${YACHT_ROUNDS_TOTAL} \u624B`}${ended ? "" : ` \xB7 \u5269 ${state.rollsLeft} \u6B21\u63B7\u9AB0`} \xB7 ${turnNote}`
   );
-  if (hasRolled(state)) {
+  if (ended) {
+    lines.push("\u9AB0\u5B50: \u2014\uFF08\u672C\u5C40\u5DF2\u7ED3\u675F\uFF0C\u4E0D\u518D\u63B7\u9AB0\uFF09");
+  } else if (hasRolled(state)) {
     const faces = state.dice.map((face, index) => state.held[index] ? `[${face}*]` : `[${face}]`);
     lines.push(`\u9AB0\u5B50: ${faces.join(" ")}   \uFF08* = \u5DF2\u9501\u5B9A\uFF09`);
   } else {
     lines.push(spectator ? "\u9AB0\u5B50: \u8FD8\u6CA1\u63B7\u9AB0" : '\u9AB0\u5B50: \u8FD8\u6CA1\u63B7\u9AB0\uFF08\u5148\u6267\u884C {"action":"roll"}\uFF09');
   }
-  if (seat !== null) {
+  if (seat !== null && !ended) {
     const preview = buildPreview(state, seat);
     const cell = (category) => {
       const label = CATEGORY_LABELS[category];
@@ -758,7 +760,7 @@ function doHold(state, seat, action) {
   if (raw.length === 0) {
     const cleared = Array(DICE_COUNT).fill(false);
     const next2 = { ...state, held: cleared };
-    return { state: next2, events: [{ type: "hold", seat, held: [...cleared] }] };
+    return { state: next2, events: [{ type: "hold", seat, held: [...cleared], dice: [...next2.dice] }] };
   }
   const held = [...state.held];
   for (const item of raw) {
@@ -769,7 +771,7 @@ function doHold(state, seat, action) {
     held[index] = !held[index];
   }
   const next = { ...state, held };
-  const events = [{ type: "hold", seat, held: [...held] }];
+  const events = [{ type: "hold", seat, held: [...held], dice: [...state.dice] }];
   return { state: next, events };
 }
 function doScore(state, seat, action) {
@@ -1282,7 +1284,7 @@ function buildBattleshipTextView(state, seat) {
     if (ended) {
       const result = battleship.result(state);
       const verdict = result.winner === null ? `\u5E73\u5C40\uFF08\u53CC\u65B9\u5269\u4F59\u8230\u8239 ${result.scores[0]} : ${result.scores[1]}\uFF09` : `\u5EA7\u4F4D ${result.winner} \u83B7\u80DC\uFF08\u5269\u4F59\u8230\u8239 ${result.scores[0]} : ${result.scores[1]}\uFF09`;
-      lines2.push(`\u5BF9\u5C40\u5DF2\u7ED3\u675F\uFF1A${verdict}\u3002\u53EF\u8C03\u7528 get_result / export_log\u3002`);
+      lines2.push(`\u5BF9\u5C40\u5DF2\u7ED3\u675F\uFF1A${verdict}\u3002\uFF08Agent \u53EF\u7528 get_result / export_log \u590D\u76D8\uFF09`);
     } else if (current !== null) {
       lines2.push(`\u73B0\u5728\u8F6E\u5230\u5EA7\u4F4D ${current} \u5F00\u70AE\uFF0C\u65C1\u89C2\u89C6\u56FE\u4E0D\u53EF\u884C\u52A8\u3002`);
     }
@@ -1337,7 +1339,7 @@ function buildBattleshipTextView(state, seat) {
   }
   if (ended) {
     const result = battleship.result(state);
-    lines.push(`\u5BF9\u5C40\u5DF2\u7ED3\u675F\uFF1A${result.text} \u53EF\u8C03\u7528 get_result / export_log\u3002`);
+    lines.push(`\u5BF9\u5C40\u5DF2\u7ED3\u675F\uFF1A${result.text}\uFF08Agent \u53EF\u7528 get_result / export_log \u590D\u76D8\uFF09`);
   } else if (state.turn === seat) {
     lines.push('\u8F6E\u5230\u4F60\u5F00\u70AE\uFF1A{"action":"fire","cell":[row,col]}\uFF0Crow/col \u53D6 0-4\u3002\u547D\u4E2D\u53EF\u7EE7\u7EED\u6253\u3002');
   } else {
@@ -2121,7 +2123,10 @@ function matchesLegalAction(action, pattern) {
   return Object.keys(pattern).every((key2) => key2 in action && deepEqual(action[key2], pattern[key2]));
 }
 function stripActionHints(textView) {
-  return textView.split("\n").filter((line) => !ACTION_HINT_RE.test(line.trim())).join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
+  return textView.split("\n").filter((line) => {
+    const trimmed = line.trim();
+    return !ACTION_HINT_RE.test(trimmed) && !ACTION_HINT_CONTAINS_RE.test(trimmed);
+  }).join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
 }
 function decorateTextView(raw, info) {
   if (!info.waiting && !info.submitted) return raw;
@@ -2148,7 +2153,7 @@ function activePersistenceInfo() {
   const file = latest.persistenceFile;
   return file === null ? null : { file, restored: latest.restoredCount };
 }
-var SESSION_ID_PATTERN, SeatTakenError, SeatTokenRequiredError, ACTION_HINT_RE, defaultPersistConfig, persistedManagers, RoomManager;
+var SESSION_ID_PATTERN, SeatTakenError, SeatTokenRequiredError, ACTION_HINT_RE, ACTION_HINT_CONTAINS_RE, defaultPersistConfig, persistedManagers, RoomManager;
 var init_rooms = __esm({
   "packages/server/src/rooms.ts"() {
     "use strict";
@@ -2169,7 +2174,8 @@ var init_rooms = __esm({
         this.name = "SeatTokenRequiredError";
       }
     };
-    ACTION_HINT_RE = /^(轮到你了：|还没结束：|本局还没结算：|下一步：|可执行：)/;
+    ACTION_HINT_RE = /^(轮到你了[：:]|还没结束[：:]|本局还没结算[：:]|下一步[：:]|可执行[：:]|骰子: 还没掷骰（先执行)/;
+    ACTION_HINT_CONTAINS_RE = /(可执行[：:]|先执行\s*\{|"action"\s*:|legalActions 为空是正常的)/;
     defaultPersistConfig = null;
     persistedManagers = /* @__PURE__ */ new Set();
     RoomManager = class {
@@ -29063,8 +29069,15 @@ function formatEvents(rawEvents) {
       const dice = ev.dice.map((face, index) => ev.held[index] ? `[${face}*]` : `[${face}]`).join(" ");
       lines.push(`\u{1F3B2} \u5EA7\u4F4D${ev.seat} \u63B7\u9AB0\uFF1A${dice}\uFF08\u672C\u624B\u8FD8\u5269 ${ev.rollsLeft} \u6B21\uFF09`);
     } else if (ev.type === "hold") {
-      const held = ev.held.map((locked, index) => `${index}${locked ? "\u{1F512}" : ""}`).join(" ");
-      lines.push(`\u{1F4CC} \u5EA7\u4F4D${ev.seat} \u9501\u5B9A\u72B6\u6001\uFF1A${held}`);
+      const heldArr = Array.isArray(ev.held) ? ev.held : [];
+      const dice = Array.isArray(ev.dice) ? ev.dice : null;
+      if (dice) {
+        const faces = dice.map((face, i) => heldArr[i] ? `[${face}*]` : `[${face}]`).join(" ");
+        lines.push(`\u{1F4CC} \u5EA7\u4F4D${ev.seat} \u9501\u5B9A\uFF1A${faces}   \uFF08* = \u5DF2\u9501\u5B9A\uFF0C\u5171 ${heldArr.filter(Boolean).length} \u9897\uFF09`);
+      } else {
+        const held = heldArr.map((locked, index) => `${index}${locked ? "\u{1F512}" : ""}`).join(" ");
+        lines.push(`\u{1F4CC} \u5EA7\u4F4D${ev.seat} \u9501\u5B9A\u72B6\u6001\uFF1A${held}`);
+      }
     } else if (ev.type === "score") {
       const nextText = ev.nextSeat === null ? "\uFF08\u7EC8\u5C40\uFF09" : `\uFF0C\u6362\u5EA7\u4F4D ${ev.nextSeat}`;
       lines.push(`\u{1F4DD} \u5EA7\u4F4D${ev.seat} \u8BB0\u300C${categoryLabel(ev.category)}\u300D\u5F97 ${ev.gained} \u5206${nextText}`);
