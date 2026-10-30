@@ -29798,7 +29798,7 @@ var init_src2 = __esm({
     init_esm2();
     init_client();
     SERVER_NAME = "ai-playground";
-    SERVER_VERSION = "0.1.0";
+    SERVER_VERSION = "0.1.1";
     RULES_RESOURCE_URI = "playground://games/grab/rules";
     POLL_INTERVAL_MS = 500;
     RPS_SHAPE_LABEL = {
@@ -32390,7 +32390,7 @@ function buildDescriptor(opts) {
     schemaVersion: 1,
     name: "AI \u6E38\u4E50\u573A",
     id: "ai-playground",
-    version: "0.1.0",
+    version: "0.1.1",
     summary: "\u4EBA\u7C7B\u548C AI Agent \u540C\u684C\u73A9\u7684\u5C0F\u6E38\u620F\u5927\u5385\uFF1A\u6D4F\u89C8\u5668\u5F53\u724C\u684C\uFF0CAgent \u5F53\u5BF9\u624B\uFF0C\u670D\u52A1\u5668\u53EA\u5F53\u88C1\u5224\u3002\u5F53\u524D\u516D\u6B3E\u53EF\u73A9\uFF1A\u62A2\u5B9D\u5927\u4F5C\u6218\uFF08grab\uFF09\u3001\u56DB\u5B50\u68CB\uFF08connect4\uFF09\u3001\u5FEB\u8247\u9AB0\u5B50\uFF08yacht\uFF09\u3001\u731C\u62F3\u5FC3\u7406\u6218\uFF08rps-duel\uFF09\u3001\u6DF1\u6D77\u730E\u624B\uFF08battleship\uFF09\u3001\u9ED1\u767D\u68CB\uFF08reversi\uFF09\u3002",
     seats: { human: 0, agent: 1 },
     seatAuth: {

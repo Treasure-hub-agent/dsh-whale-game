@@ -2,7 +2,38 @@
 
 > npm 包名是 `dsh-whale-game`（`dsh-whale-arcade` 已被另一个 DSH 插件占用）；中文名一直是「大肥鱼游戏厅」。
 
-## 0.1.3 — 待发布（2026-10-29）
+## 0.1.4 — 2026-10-30
+
+**真实对局测试波之后的稳定版**：四个测试员（2 个 Agent 玩家 + 1 个真人模拟器 + 1 个裁判）
+真打了 8 局后，插件侧暴露的三个问题全部修掉；同时给「插件内置本体」加上同步校验。
+
+### 修复
+
+- **游戏厅不再弹控制台窗口**：`spawn(command, { shell: true })` 会先起 `cmd.exe`，
+  Windows 给它分配控制台窗口，`windowsHide` 压不住。默认（bundled）路径改为**不经 shell**、
+  直接 `spawn(node.exe, [entry, 'serve'])`；用户自定义命令 / repo / npx 路径仍走 shell。
+  新增 `resolveNodeExe()`（按 PATH 找 node.exe，支持 `WHALE_NODE_EXE` 覆盖）——
+  坑：插件跑在 Electron 宿主里，`process.execPath` 是 `DeepSeek Harness.exe`，不能当 node 用。
+- **`GET /whale-arcade/status` 空闲态会探活**：以前「插件起的厅被外部杀掉、之后又有人手动起了一个」
+  时，面板一直显示「已停止」而端口其实在跑。现在空闲态只读探测一次 `/api/games`，
+  探通就按「外部实例运行中」记账，不接管、不 kill。
+
+### 新增
+
+- **`POST /whale-arcade/wake/check`**（只问不投）：平台在绑定会话前先问「这个会话叫得动吗」。
+  subagent routing 的会话会得到 `wakeable:false` + 原因，平台据此当场 409 `session-unwakeable`
+  婉拒，不用等人类落子才发现。
+- **本体同步可校验**：`VENDORED.txt` 增记 `platform commit` 与 `dist sha256`；
+  `pnpm check` 会比对记录哈希与 `vendor/app/dist/index.js` 实际哈希，不一致直接失败
+  （实测：往 vendor 追一行 → 自检立刻报错）。
+
+### 变更
+
+- 内置本体同步到平台 **0.1.1**（含唤醒桥预检、终局唤醒、令牌续座、中文错误体、
+  挂起态文案、grab 撞车反馈、yacht 终局文案与 hold 骰面等修复，详见平台仓 CHANGELOG）。
+- 测试：node:test **34** 条（新增 `/wake/check` 三条、本体哈希校验、status 探活相关）。
+
+## 0.1.3 — 2026-10-30（已发布 npm）
 
 **唤醒桥 + 桌面集成**：人类在浏览器落子后，Agent 会被自动叫醒出一手（不用再手搓提醒）。
 
