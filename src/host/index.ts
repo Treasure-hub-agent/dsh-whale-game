@@ -135,6 +135,35 @@ export interface LaunchSpec {
   env: Record<string, string>;
   /** 这次是从哪条路来的，界面上用来回答「本体从哪来的」 */
   source: 'config' | 'env' | 'repo' | 'bundled' | 'npx';
+  /**
+   * 可以直接 spawn 的可执行文件与参数（第 17 轮：为了不弹黑窗）。
+   *
+   * 为什么需要它：`shell: true` 会先起一个 `cmd.exe /c`，Windows 会给那个 cmd
+   * 分配控制台窗口——即使写了 `windowsHide` 也照弹（用户实测截图里那扇黑窗）。
+   * 只有「不经过 shell、直接 spawn 一个 .exe」才会真的无窗口。
+   * 用户自定义命令 / 需要 shell 解析的路径仍走 command + shell。
+   */
+  argv?: { file: string; args: string[] };
+}
+
+/**
+ * 找出本机的 node.exe（第 17 轮）。
+ *
+ * 坑：插件跑在 Electron 宿主里，`process.execPath` 是 `DeepSeek Harness.exe`，
+ * 直接拿它当 node 用会再拉起一个 DSH 本体。所以按 PATH 找 node.exe，
+ * 找不到就返回 null（调用方退回 shell 模式，最多是继续弹窗，不会起错东西）。
+ */
+export function resolveNodeExe(env: NodeJS.ProcessEnv = process.env): string | null {
+  const explicit = env.WHALE_NODE_EXE?.trim();
+  if (explicit && existsSync(explicit)) return explicit;
+  const pathValue = env.PATH ?? env.Path ?? '';
+  for (const dir of pathValue.split(';')) {
+    const trimmed = dir.trim();
+    if (!trimmed) continue;
+    const candidate = join(trimmed, 'node.exe');
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
 }
 
 /**
@@ -157,11 +186,14 @@ function resolveCommand(config: LauncherConfig): LaunchSpec {
     };
   }
   if (existsSync(VENDORED_APP_ENTRY)) {
+    const nodeExe = resolveNodeExe();
     return {
       command: `node "${VENDORED_APP_ENTRY}" serve`,
       // 自带本体的静态资源在包内；显式指过去，免得 CLI 自己算错
       env: { PLAYGROUND_WEB_DIST: join(VENDORED_APP_DIR, 'web') },
       source: 'bundled',
+      // 找得到 node.exe 就直接 spawn（无黑窗）；找不到就退回 command + shell。
+      ...(nodeExe ? { argv: { file: nodeExe, args: [VENDORED_APP_ENTRY, 'serve'] } } : {}),
     };
   }
   return { command: 'npx --yes ai-playground-cli@latest serve', env: {}, source: 'npx' };
@@ -352,21 +384,34 @@ class Supervisor {
       // 用 Start-Process / 普通 spawn 派生的进程会挂在 DSH 的进程树里，DSH 退出时的
       // Ctrl+C 会顺着进程树把它带走（已实测）；detached 之后它自成一个进程组，
       // 宿主退出与它无关。代价是没有 stdout——日志只剩插件自己的状态行，可以接受。
-      const child = spawn(command, {
-        cwd,
-        shell: true,
-        detached: true,
-        windowsHide: true,
-        stdio: 'ignore',
-        env: {
-          ...process.env,
-          ...launch.env,
-          ...wakeEnv.env,
-          PORT: String(this.config.port),
-          HOST: '127.0.0.1',
-          FORCE_COLOR: '0',
-        },
-      });
+      //
+      // 第 17 轮：有 argv 就**不经过 shell**直接 spawn。走 shell 会先起 cmd.exe，
+      // Windows 会给 cmd 分配控制台窗口（windowsHide 也压不住），用户就看见一扇黑窗。
+      const childEnv = {
+        ...process.env,
+        ...launch.env,
+        ...wakeEnv.env,
+        PORT: String(this.config.port),
+        HOST: '127.0.0.1',
+        FORCE_COLOR: '0',
+      };
+      const child = launch.argv
+        ? spawn(launch.argv.file, launch.argv.args, {
+            cwd,
+            detached: true,
+            windowsHide: true,
+            stdio: 'ignore',
+            env: childEnv,
+          })
+        : spawn(command, {
+            cwd,
+            shell: true,
+            detached: true,
+            windowsHide: true,
+            stdio: 'ignore',
+            env: childEnv,
+          });
+      if (launch.argv) this.push(`  [nowindow] ${launch.argv.file}（不经 shell，避免控制台窗口）`);
       this.child = child;
       // 不 unref 的话子进程句柄会撑住 DSH 的事件循环：宿主想退都退不掉。
       child.unref();
