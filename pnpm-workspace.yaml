@@ -1,6 +1,15 @@
 packages:
   - .
 
+# esbuild 需要跑 install 脚本落地原生二进制；pnpm 10+ 默认拦构建脚本，
+# 不显式允许的话 `pnpm install` 会以 ERR_PNPM_IGNORED_BUILDS 失败（无 TTY 的 CI 必踩）。
+allowBuilds:
+  esbuild: true
+
 onlyBuiltDependencies:
   - esbuild
 
+# pnpm 11 在 `pnpm run <script>` 前会做一次依赖状态预检（必要时自动 install）。
+# 本仓锁文件已提交，需要装依赖时显式 `pnpm install` 即可——别让预检把 check 卡在
+# 与代码无关的地方（无 TTY 时它还会因为「要重建 node_modules」直接中止）。
+verifyDepsBeforeRun: false

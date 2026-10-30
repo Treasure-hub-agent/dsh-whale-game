@@ -1872,6 +1872,9 @@ function toSnapshot(room) {
     // 否则重启后浏览器手里的令牌全失效，所有人都得重新入座。
     seatTokens: [room.seatTokens[0], room.seatTokens[1]],
     pending: [room.pending[0], room.pending[1]],
+    // 唤醒桥绑定必须落盘：重启后人类继续落子，还得能叫醒同一个会话。
+    // lastWakeAt / lastWakeError 是进程内运行态，刻意不落盘（重启后按「没叫过」呈现）。
+    wake: room.wake ? { sessionId: room.wake.sessionId, boundAt: room.wake.boundAt } : null,
     chat: room.chat,
     log: room.log,
     result: room.result,
@@ -1879,6 +1882,16 @@ function toSnapshot(room) {
     lastActivity: room.lastActivity,
     lastSayAt: room.lastSayAt,
     chatSeq: room.chatSeq
+  };
+}
+function readWakeBinding(value) {
+  if (!isRecord(value)) return null;
+  const sessionId = value.sessionId;
+  if (typeof sessionId !== "string" || sessionId === "") return null;
+  const boundAt = Number(value.boundAt);
+  return {
+    sessionId,
+    boundAt: Number.isFinite(boundAt) && boundAt > 0 ? boundAt : Date.now()
   };
 }
 function fromSnapshot(snapshot) {
@@ -1898,6 +1911,9 @@ function fromSnapshot(snapshot) {
     occupied: [Boolean(snapshot.occupied?.[0]), Boolean(snapshot.occupied?.[1])],
     seatTokens: [snapshot.seatTokens?.[0] ?? null, snapshot.seatTokens?.[1] ?? null],
     pending: [snapshot.pending?.[0] ?? null, snapshot.pending?.[1] ?? null],
+    // 旧文件（第 14 轮之前写的）没有 wake 字段：当成「没绑定」恢复即可，
+    // 所以**不 bump PERSIST_VERSION**——一 bump 就会把主人机器上正在打的真实房间全丢。
+    wake: readWakeBinding(snapshot.wake),
     chat: Array.isArray(snapshot.chat) ? snapshot.chat : [],
     log: Array.isArray(snapshot.log) ? snapshot.log : [],
     result: snapshot.result ?? null,
@@ -2033,9 +2049,18 @@ __export(rooms_exports, {
   SeatTokenRequiredError: () => SeatTokenRequiredError,
   activePersistenceInfo: () => activePersistenceInfo,
   configurePersistence: () => configurePersistence,
-  flushActiveRooms: () => flushActiveRooms
+  flushActiveRooms: () => flushActiveRooms,
+  normalizeSessionId: () => normalizeSessionId
 });
 import { randomBytes, timingSafeEqual } from "node:crypto";
+function normalizeSessionId(value) {
+  const id = typeof value === "string" ? value.trim() : "";
+  if (!id) throw new Error("\u7F3A\u5C11 sessionId\uFF08\u901A\u5E38\u53D6\u73AF\u5883\u53D8\u91CF DSH_SESSION_ID\uFF09");
+  if (!SESSION_ID_PATTERN.test(id)) {
+    throw new Error(`sessionId \u683C\u5F0F\u4E0D\u5408\u6CD5\uFF08\u53EA\u5141\u8BB8 A-Za-z0-9._:-\uFF0C\u6700\u957F 128\uFF09\uFF1A${JSON.stringify(value)}`);
+  }
+  return id;
+}
 function shortId() {
   return Math.random().toString(36).slice(2, 8);
 }
@@ -2090,12 +2115,13 @@ function activePersistenceInfo() {
   const file = latest.persistenceFile;
   return file === null ? null : { file, restored: latest.restoredCount };
 }
-var SeatTakenError, SeatTokenRequiredError, defaultPersistConfig, persistedManagers, RoomManager;
+var SESSION_ID_PATTERN, SeatTakenError, SeatTokenRequiredError, defaultPersistConfig, persistedManagers, RoomManager;
 var init_rooms = __esm({
   "packages/server/src/rooms.ts"() {
     "use strict";
     init_src();
     init_persist();
+    SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
     SeatTakenError = class extends Error {
       code = "seat_taken";
       constructor(roomId, seat) {
@@ -2197,6 +2223,7 @@ var init_rooms = __esm({
           // 若等 join 时才发，任何访客一个 POST /join {seat:0} 就能抢走房主的人类座位。
           seatTokens: [createSeatToken(), null],
           pending: [null, null],
+          wake: null,
           chat: [],
           log: [],
           result: null,
@@ -2265,6 +2292,33 @@ var init_rooms = __esm({
           room.status = "playing";
         }
       }
+      /**
+       * 绑定唤醒会话（第 14 轮）。幂等：同一个 sessionId 重复绑定只会刷新 boundAt。
+       *
+       * 为什么允许改绑：Agent 换会话（重开 DSH / 换 profile）是正常情况，
+       * 「最后绑的那个说了算」比报错更好用；旧会话此后不会再被叫醒。
+       */
+      bindWake(id, sessionId) {
+        const normalized = normalizeSessionId(sessionId);
+        const room = this.mustGet(id);
+        const binding = { sessionId: normalized, boundAt: Date.now() };
+        room.wake = binding;
+        room.lastWakeError = null;
+        room.lastWakeAt = null;
+        this.markDirty();
+        return binding;
+      }
+      /**
+       * 记一次唤醒投递结果，供 GET /api/rooms/:id 的只读诊断字段。
+       * 用 `rooms.get` 而不是 `mustGet`：唤醒是旁路，不该因为房间刚好被 TTL 清掉就
+       * 顺手延长它（更不该在唤醒链路上抛异常）。
+       */
+      noteWakeResult(id, result) {
+        const room = this.rooms.get(id);
+        if (!room) return;
+        room.lastWakeAt = result.at;
+        room.lastWakeError = result.ok ? null : result.error;
+      }
       /** 公开摘要：**绝不能**带令牌或 humanUrlPath，否则任意 GET 一次就能拿到座位凭据。 */
       summary(id) {
         const room = this.mustGet(id);
@@ -2279,7 +2333,14 @@ var init_rooms = __esm({
           occupied: room.occupied,
           // 轮流制没有「挂起动作」这一说，恒为空，避免前端误显示「对方已提交」。
           pendingSeats: turnBased ? [] : [0, 1].filter((s) => room.pending[s] !== null),
-          result: room.result
+          result: room.result,
+          // 只读诊断：不回传任何令牌；boundSessionId 本身就是 Agent 的会话 id，
+          // 设计稿明确要它出现在公开 summary 里（人类 / 排查者据此确认「绑定生效了没」）。
+          wake: {
+            boundSessionId: room.wake?.sessionId ?? null,
+            lastWakeAt: room.lastWakeAt ?? null,
+            lastWakeError: room.lastWakeError ?? null
+          }
         };
       }
       /**
@@ -4674,7 +4735,7 @@ var require_websocket = __commonJS({
     var http = __require("http");
     var net = __require("net");
     var tls = __require("tls");
-    var { randomBytes: randomBytes2, createHash } = __require("crypto");
+    var { randomBytes: randomBytes3, createHash } = __require("crypto");
     var { Duplex, Readable: Readable2 } = __require("stream");
     var { URL: URL2 } = __require("url");
     var PerMessageDeflate2 = require_permessage_deflate();
@@ -5225,7 +5286,7 @@ var require_websocket = __commonJS({
         }
       }
       const defaultPort = isSecure ? 443 : 80;
-      const key2 = randomBytes2(16).toString("base64");
+      const key2 = randomBytes3(16).toString("base64");
       const request2 = isSecure ? https.request : http.request;
       const protocolSet = /* @__PURE__ */ new Set();
       let perMessageDeflate;
@@ -28619,7 +28680,9 @@ async function listGames() {
   const data = await request("GET", "/api/games");
   return Array.isArray(data.games) ? data.games : [];
 }
-async function createRoom(gameId = "grab") {
+async function createRoom(gameId = "grab", sessionId) {
+  const requestBody = { gameId };
+  if (sessionId) requestBody.sessionId = sessionId;
   const wrap = (data, wipBypass) => {
     const roomId = data.roomId;
     rememberSeatTokensFrom(roomId, data.seatTokens);
@@ -28630,17 +28693,17 @@ async function createRoom(gameId = "grab") {
     };
   };
   try {
-    const data = await request("POST", "/api/rooms", { gameId });
+    const data = await request("POST", "/api/rooms", requestBody);
     return wrap(data, false);
   } catch (err) {
     if (!(err instanceof PlaygroundApiError) || err.status !== 400) throw err;
-    const body = asRecord(err.body);
-    const hint = typeof body?.hint === "string" ? body.hint : "";
+    const errorBody2 = asRecord(err.body);
+    const hint = typeof errorBody2?.hint === "string" ? errorBody2.hint : "";
     const looksLikeWip = /allowWip/i.test(hint) || /开发中|wip/i.test(`${err.message} ${hint}`);
     if (!looksLikeWip) throw err;
     try {
       const data = await request("POST", "/api/rooms", {
-        gameId,
+        ...requestBody,
         allowWip: true
       });
       return wrap(data, true);
@@ -28652,17 +28715,22 @@ async function createRoom(gameId = "grab") {
     }
   }
 }
-async function joinRoom(roomId, seat = 1) {
+async function joinRoom(roomId, seat = 1, sessionId) {
   const existing = getSeatToken(roomId, seat);
   const data = await request(
     "POST",
     `/api/rooms/${encodeURIComponent(roomId)}/join`,
-    { seat, ...existing ? { token: existing } : {} }
+    { seat, ...existing ? { token: existing } : {}, ...sessionId ? { sessionId } : {} }
   );
   if (isSeatToken(data.token)) rememberSeatToken(roomId, seat, data.token);
   const fallbackToken = getSeatToken(roomId, 0);
   const humanUrlPath = data.humanUrlPath ?? `/?room=${encodeURIComponent(roomId)}&seat=0${fallbackToken ? `&token=${encodeURIComponent(fallbackToken)}` : ""}`;
   return { ...data, humanUrlPath, humanUrl: absoluteUrl(humanUrlPath) };
+}
+async function bindSession(roomId, sessionId) {
+  return request("POST", `/api/rooms/${encodeURIComponent(roomId)}/bind`, {
+    sessionId
+  });
 }
 async function getState(roomId, seat = 1, options = {}) {
   const token = resolveSeatToken(roomId, seat, "\u8BFB\u53D6\u8BE5\u5EA7\u4F4D\u7684\u89C2\u6D4B", options);
@@ -28995,6 +29063,8 @@ function normalizeActionJson(raw) {
 function registerTools(server) {
   const roomIdSchema = external_exports.string().min(1, "roomId \u4E0D\u80FD\u4E3A\u7A7A\uFF08\u6765\u81EA playground_create_room \u7684 roomId\uFF09").describe("\u623F\u95F4 id\uFF0C\u6765\u81EA playground_create_room \u7684 roomId");
   const seatSchema = external_exports.number().int("seat \u5FC5\u987B\u662F\u6574\u6570").min(0, "seat \u53EA\u80FD\u662F 0\uFF08\u4EBA\u7C7B\uFF09\u6216 1\uFF08Agent\uFF09").max(1, "seat \u53EA\u80FD\u662F 0\uFF08\u4EBA\u7C7B\uFF09\u6216 1\uFF08Agent\uFF09").default(1).describe("\u5EA7\u4F4D\uFF1A0=\u4EBA\u7C7B\uFF0C1=Agent\uFF08\u9ED8\u8BA4 1\uFF09");
+  const sessionIdRequiredSchema = external_exports.string().min(1, "sessionId \u4E0D\u80FD\u4E3A\u7A7A\uFF08DSH \u91CC\u901A\u5E38\u662F\u73AF\u5883\u53D8\u91CF DSH_SESSION_ID\uFF09").max(128, "sessionId \u6700\u957F 128 \u5B57\u7B26").regex(/^[A-Za-z0-9._:-]+$/, "sessionId \u53EA\u5141\u8BB8 A-Za-z0-9._:-").describe("DSH \u4F1A\u8BDD id\uFF08\u5F62\u5982 session-\u2026\uFF1B\u901A\u5E38\u53D6\u73AF\u5883\u53D8\u91CF DSH_SESSION_ID\uFF09");
+  const sessionIdSchema = sessionIdRequiredSchema.optional().describe("\u53EF\u9009\uFF1A\u5EFA\u684C / \u5165\u5EA7\u540E\u7ACB\u5373\u7ED1\u5B9A\u8FD9\u4E2A\u4F1A\u8BDD\uFF0C\u7B49\u4EF7\u4E8E\u518D\u8C03\u4E00\u6B21 playground_bind_session");
   registerTool(
     server,
     "playground_list_games",
@@ -29038,11 +29108,12 @@ function registerTools(server) {
       inputSchema: {
         gameId: external_exports.string().min(1, "gameId \u4E0D\u80FD\u4E3A\u7A7A").optional().describe(
           "\u6E38\u620F id\uFF1Agrab\uFF08\u62A2\u5B9D\uFF09/ connect4\uFF08\u56DB\u5B50\u68CB\uFF09/ yacht\uFF08\u5FEB\u8247\u9AB0\u5B50\uFF09/ rps-duel\uFF08\u731C\u62F3\u5FC3\u7406\u6218\uFF09/ battleship\uFF08\u6DF1\u6D77\u730E\u624B\uFF09/ reversi\uFF08\u9ED1\u767D\u68CB\uFF09\uFF0C\u9ED8\u8BA4 grab"
-        )
+        ),
+        sessionId: sessionIdSchema
       }
     },
-    async ({ gameId }) => guard(async () => {
-      const room = await createRoom(gameId ?? "grab");
+    async ({ gameId, sessionId }) => guard(async () => {
+      const room = await createRoom(gameId ?? "grab", sessionId);
       const lines = [
         "\u2705 \u623F\u95F4\u5DF2\u521B\u5EFA",
         `- roomId: ${room.roomId}`,
@@ -29068,6 +29139,8 @@ function registerTools(server) {
         "",
         "\u6CE8\u610F\uFF1A\u6CA1\u6709\u5165\u5EA7\u5C31\u62FF\u4E0D\u5230\u4EE4\u724C\uFF0Cget_state \u53EA\u4F1A\u770B\u5230\u65C1\u89C2\u89C6\u56FE\uFF08legalActions \u6052\u4E3A\u7A7A\uFF09\uFF0C\u4E5F\u4E0D\u80FD\u51FA\u62DB\u3002",
         "",
+        sessionId ? `\u{1F514} \u5DF2\u628A\u672C\u623F\u95F4\u7ED1\u5B9A\u5230\u4F1A\u8BDD ${sessionId}\uFF1A\u4E4B\u540E\u4EBA\u7C7B\u843D\u5B50\u3001\u8F6E\u5230 Agent \u65F6\u670D\u52A1\u7AEF\u4F1A\u81EA\u52A8\u5524\u9192\u5B83\u3002` : "\u{1F514} \u60F3\u8BA9\u670D\u52A1\u7AEF\u5728\u4F60\u8BE5\u51FA\u62DB\u65F6\u81EA\u52A8\u53EB\u9192\u4F60\uFF08\u4E0D\u5FC5\u81EA\u5DF1\u5B9A\u95F9\u949F\u8F6E\u8BE2\uFF09\uFF1A\u8C03\u7528 playground_bind_session({ roomId, sessionId: \u4F60\u7684 DSH_SESSION_ID })\uFF0C\u6216\u5728 create_room / join_room \u65F6\u76F4\u63A5\u4F20 sessionId\u3002",
+        "",
         `\u5B8C\u6574\u89C4\u5219\u89C1 MCP \u8D44\u6E90 ${rulesResourceUri(room.gameId)}\uFF0C\u6216\u672C\u7ED3\u679C structuredContent.rules\u3002`
       );
       if (room.wipBypass) {
@@ -29086,7 +29159,9 @@ function registerTools(server) {
         rules: room.rules,
         // 令牌对 Agent 透明，但结构化返回里保留，方便人类 / 调试时核对。
         seatTokens: room.seatTokens ?? null,
-        wipBypass: room.wipBypass === true
+        wipBypass: room.wipBypass === true,
+        // 唤醒桥：建桌时传了 sessionId 才有值，null = 没绑定（行为与以前一致）。
+        wake: room.wake ?? null
       });
     })
   );
@@ -29098,11 +29173,12 @@ function registerTools(server) {
       description: "\u5728\u623F\u95F4\u91CC\u5165\u5EA7\uFF08\u5E42\u7B49\uFF09\uFF0C\u8FD4\u56DE\u8BE5\u5EA7\u4F4D\u7684**\u5E2D\u4F4D\u4EE4\u724C**\u3002Agent \u9ED8\u8BA4 seat=1\uFF1Bseat=0 \u662F\u4EBA\u7C7B\u5EA7\u4F4D\uFF08\u81EA\u52A8\u5316\u6D4B\u8BD5\u65F6\u53EF\u7528\u6765\u6A21\u62DF\u4EBA\u7C7B\uFF09\u3002\u53CC\u65B9\u90FD\u5165\u5EA7\u540E\u623F\u95F4\u72B6\u6001\u53D8\u4E3A playing\u3002\u5E2D\u4F4D\u9274\u6743\u4E4B\u540E\uFF0C`seat` \u53C2\u6570\u4E0D\u518D\u4EE3\u8868\u8EAB\u4EFD\uFF1A\u53EA\u6709\u62FF\u5230\u8BE5\u5EA7\u4F4D\u4EE4\u724C\u624D\u80FD\u8BFB\u79C1\u6709\u89C2\u6D4B / \u63D0\u4EA4\u52A8\u4F5C / \u8BF4\u8BDD\u3002\u4EE4\u724C\u7531 MCP \u5BA2\u6237\u7AEF\u81EA\u52A8\u4FDD\u5B58\u5E76\u9644\u52A0\u5230\u540E\u7EED\u8BF7\u6C42\uFF0CAgent \u4E0D\u9700\u8981\u624B\u52A8\u4F20\u9012\uFF1B\u5982\u679C\u4E4B\u540E\u770B\u5230 spectator: true \u6216 403 seat_token_required\uFF0C\u8BF4\u660E\u672A\u5165\u5EA7\u6216\u4EE4\u724C\u5931\u6548\uFF0C\u91CD\u65B0\u8C03\u7528\u672C\u5DE5\u5177\u5165\u5EA7\u5373\u53EF\u3002",
       inputSchema: {
         roomId: roomIdSchema,
-        seat: seatSchema
+        seat: seatSchema,
+        sessionId: sessionIdSchema
       }
     },
-    async ({ roomId, seat }) => guard(async () => {
-      const joined = await joinRoom(roomId, seat);
+    async ({ roomId, seat, sessionId }) => guard(async () => {
+      const joined = await joinRoom(roomId, seat, sessionId);
       const lines = [
         `\u2705 \u5DF2\u5165\u5EA7\uFF1AroomId=${joined.roomId}\uFF0Cseat=${seat}\uFF08${seatName(seat)}\uFF09`,
         `\u5E2D\u4F4D\u4EE4\u724C\uFF1A${joined.token ?? "\uFF08\u670D\u52A1\u7AEF\u672A\u8FD4\u56DE\uFF0C\u53EF\u80FD\u8FD8\u662F\u65E7\u7248\u672C\uFF09"}`,
@@ -29112,6 +29188,9 @@ function registerTools(server) {
         `\u5F85\u63D0\u4EA4\u52A8\u4F5C\u7684\u5EA7\u4F4D\uFF1A${joined.pendingSeats.length > 0 ? joined.pendingSeats.join("\u3001") : "\u65E0"}`,
         `\u4EBA\u7C7B\u5165\u53E3\uFF1A${joined.humanUrl}`
       ];
+      if (joined.wake?.boundSessionId) {
+        lines.push(`\u{1F514} \u5524\u9192\u6865\u5DF2\u7ED1\u5B9A\u4F1A\u8BDD\uFF1A${joined.wake.boundSessionId}\uFF08\u8F6E\u5230 Agent \u65F6\u670D\u52A1\u7AEF\u4F1A\u4E3B\u52A8\u53EB\u9192\u5B83\uFF09`);
+      }
       if (joined.status === "waiting") {
         lines.push("", "\u4E0B\u4E00\u6B65\uFF1A\u628A\u4EBA\u7C7B\u5165\u53E3\u53D1\u7ED9\u4EBA\u7C7B\u5165\u5EA7\uFF1B\u53CC\u65B9\u5230\u9F50\u540E\u53EF\u8C03\u7528 playground_wait_for_turn \u7B49\u5F85\u8F6E\u5230\u4F60\u3002");
       } else if (joined.status === "playing") {
@@ -29119,7 +29198,43 @@ function registerTools(server) {
       } else {
         lines.push("", "\u5BF9\u5C40\u5DF2\u7ED3\u675F\uFF1A\u53EF\u8C03\u7528 playground_get_result \u67E5\u770B\u7ED3\u7B97\uFF0C\u6216 playground_export_log \u5BFC\u51FA\u65E5\u5FD7\u3002");
       }
+      if (!joined.wake?.boundSessionId) {
+        lines.push(
+          "",
+          "\u{1F514} \u60F3\u8BA9\u670D\u52A1\u7AEF\u5728\u4F60\u8BE5\u51FA\u62DB\u65F6\u81EA\u52A8\u53EB\u9192\u4F60\uFF1Aplayground_bind_session({ roomId, sessionId: \u4F60\u7684 DSH_SESSION_ID })\uFF0C\u6216\u5728 join_room \u65F6\u76F4\u63A5\u4F20 sessionId\u3002\u5524\u9192\u5931\u8D25\u53EA\u8BB0\u670D\u52A1\u7AEF\u65E5\u5FD7\uFF0C\u4E0D\u5F71\u54CD\u5BF9\u5C40\u3002"
+        );
+      }
       return ok(lines.join("\n"), payload(joined));
+    })
+  );
+  registerTool(
+    server,
+    "playground_bind_session",
+    {
+      title: "\u7ED1\u5B9A\u4F1A\u8BDD\uFF08\u5524\u9192\u6865\uFF09",
+      description: "\u628A\u623F\u95F4\u7ED1\u5B9A\u5230\u4E00\u4E2A DSH \u4F1A\u8BDD\uFF08sessionId \u4E00\u822C\u53D6\u73AF\u5883\u53D8\u91CF DSH_SESSION_ID\uFF09\uFF1A\u4E4B\u540E\u4EBA\u7C7B\u6BCF\u6B21\u843D\u5B50\u3001\u8F6E\u5230 Agent \u65F6\uFF0C\u670D\u52A1\u7AEF\u4F1A\u4E3B\u52A8 POST \u5524\u9192\u8BE5\u4F1A\u8BDD\uFF0CAgent \u4E0D\u5FC5\u81EA\u5DF1\u5B9A\u95F9\u949F\u8F6E\u8BE2\u3002\u4E5F\u53EF\u4EE5\u5728 playground_create_room / playground_join_room \u65F6\u76F4\u63A5\u4F20 sessionId\uFF0C\u4E00\u6B65\u5230\u4F4D\u3002\u7ED1\u5B9A\u5E42\u7B49\uFF08\u91CD\u590D\u7ED1\u5B9A\u53EA\u5237\u65B0\u65F6\u95F4\uFF0C\u6362 sessionId \u5373\u6539\u7ED1\uFF09\uFF1B\u5B83\u53EA\u51B3\u5B9A\u300C\u53EB\u9192\u8C01\u300D\uFF0C\u4E0D\u6539\u53D8\u5BF9\u5C40\u89C4\u5219\uFF0C\u4E5F\u4E0D\u5F71\u54CD\u5E2D\u4F4D\u4EE4\u724C\uFF1B\u5524\u9192\u5931\u8D25\u53EA\u8BB0\u670D\u52A1\u7AEF\u65E5\u5FD7\uFF08GET /api/rooms/{id} \u7684 wake \u5B57\u6BB5\u53EF\u67E5\uFF09\uFF0C\u7EDD\u4E0D\u5F71\u54CD\u5BF9\u5C40\u3002",
+      inputSchema: {
+        roomId: roomIdSchema,
+        sessionId: sessionIdRequiredSchema
+      }
+    },
+    async ({ roomId, sessionId }) => guard(async () => {
+      const bound = await bindSession(roomId, sessionId);
+      const lines = [
+        `\u2705 \u5DF2\u7ED1\u5B9A\u5524\u9192\u4F1A\u8BDD\uFF1AroomId=${bound.roomId}`,
+        `- sessionId: ${bound.sessionId}`,
+        `- boundAt: ${new Date(bound.boundAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" })}`,
+        "",
+        "\u4E4B\u540E\u4EBA\u7C7B\u843D\u5B50\u3001\u8F6E\u5230 Agent \u65F6\uFF0C\u670D\u52A1\u7AEF\u4F1A\u4E3B\u52A8\u5524\u9192\u8FD9\u4E2A\u4F1A\u8BDD\uFF08\u540C\u4E00\u56DE\u5408\u6700\u591A 2 \u6B21\u3001\u95F4\u9694 \u22653 \u79D2\uFF09\u3002",
+        `\u60F3\u786E\u8BA4\u7ED1\u5B9A\u662F\u5426\u751F\u6548\uFF1AGET /api/rooms/${bound.roomId} \u7684 wake.boundSessionId\u3002`,
+        "\u5524\u9192\u5931\u8D25\u53EA\u8BB0\u670D\u52A1\u7AEF\u65E5\u5FD7\uFF0C\u4E0D\u5F71\u54CD\u5BF9\u5C40\uFF1B\u4EBA\u7C7B\u90A3\u8FB9\u7167\u65E7\u53EF\u4EE5\u53D1\u6D88\u606F\u53EB\u4F60\u3002"
+      ];
+      return ok(lines.join("\n"), {
+        roomId: bound.roomId,
+        sessionId: bound.sessionId,
+        bound: true,
+        boundAt: bound.boundAt
+      });
     })
   );
   registerTool(
@@ -29595,7 +29710,7 @@ function createMcpServer() {
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
     {
-      instructions: 'AI \u6E38\u4E50\u573A\uFF1A\u4EBA\u7C7B\u548C Agent \u540C\u684C\u73A9\u5C0F\u6E38\u620F\u3002\u5EA7\u4F4D\uFF1A0=\u4EBA\u7C7B\uFF0C1=Agent\u3002\u6807\u51C6\u6D41\u7A0B\uFF1Aplayground_create_room \u2192 \u628A humanUrl \u53D1\u7ED9\u4EBA\u7C7B \u2192 playground_join_room(seat=1) \u2192 playground_wait_for_turn \u2192 \u8BFB textView/legalActions \u2192 playground_submit_action \u2192 \u5FAA\u73AF\u76F4\u5230\u7ED3\u675F \u2192 playground_get_result / playground_export_log\u3002\u53EA\u4F9D\u636E\u89C2\u6D4B\u505A\u51B3\u7B56\uFF0C\u4E0D\u731C\u5BF9\u624B\u672C\u56DE\u5408\u9009\u62E9\u3002\u5E2D\u4F4D\u9274\u6743\uFF08\u7B2C 12 \u8F6E\uFF09\uFF1Ajoin_room \u4F1A\u8FD4\u56DE\u8BE5\u5EA7\u4F4D\u7684\u5E2D\u4F4D\u4EE4\u724C\uFF0C\u5BA2\u6237\u7AEF\u81EA\u52A8\u4FDD\u5B58\u5E76\u9644\u52A0\u5230\u4E4B\u540E\u6BCF\u4E2A\u8BF7\u6C42\uFF1B`seat` \u53C2\u6570\u4E0D\u518D\u4EE3\u8868\u8EAB\u4EFD\uFF0C\u6CA1\u6709\u4EE4\u724C\u53EA\u80FD\u770B\u65C1\u89C2\u89C6\u56FE\uFF08spectator=true\u3001legalActions \u6052\u4E3A\u7A7A\uFF09\u4E14\u4E0D\u80FD\u884C\u52A8\u3002\u770B\u5230 spectator=true \u6216 403 seat_token_required \u65F6\uFF0C\u91CD\u65B0 playground_join_room \u5165\u5EA7\u5373\u53EF\u3002\u89C4\u5219\u8D44\u6E90\uFF1Aplayground://games/<gameId>/rules\uFF08grab / connect4 / yacht / rps-duel / battleship / reversi\uFF09\u3002\u5FEB\u8247\u9AB0\u5B50\uFF08yacht\uFF09\u7528 actionJson \u63D0\u4EA4\u4E09\u79CD\u52A8\u4F5C\uFF1A{"action":"roll"}\u3001{"action":"hold","indices":[0]}\uFF08\u4E00\u6B21\u53EA\u5207\u4E00\u9897\uFF0C[] \u5168\u89E3\u9501\uFF09\u3001{"action":"score","category":"..."}\uFF08\u8BB0\u5206\u6362\u624B\uFF09\u3002\u731C\u62F3\u5FC3\u7406\u6218\uFF08rps-duel\uFF09\u7528 actionJson \u63D0\u4EA4 {"action":"throw","shape":"rock"|"paper"|"scissors"}\uFF0C3 \u5C40\u5B9A\u80DC\u8D1F\u3001\u7B2C 3 \u5C40\u7FFB\u500D\uFF082 \u5206\uFF09\uFF0C\u53CC\u65B9\u90FD\u63D0\u4EA4\u540E\u624D\u63ED\u793A\u3002'
+      instructions: 'AI \u6E38\u4E50\u573A\uFF1A\u4EBA\u7C7B\u548C Agent \u540C\u684C\u73A9\u5C0F\u6E38\u620F\u3002\u5EA7\u4F4D\uFF1A0=\u4EBA\u7C7B\uFF0C1=Agent\u3002\u6807\u51C6\u6D41\u7A0B\uFF1Aplayground_create_room \u2192 \u628A humanUrl \u53D1\u7ED9\u4EBA\u7C7B \u2192 playground_join_room(seat=1) \u2192 playground_wait_for_turn \u2192 \u8BFB textView/legalActions \u2192 playground_submit_action \u2192 \u5FAA\u73AF\u76F4\u5230\u7ED3\u675F \u2192 playground_get_result / playground_export_log\u3002\u53EA\u4F9D\u636E\u89C2\u6D4B\u505A\u51B3\u7B56\uFF0C\u4E0D\u731C\u5BF9\u624B\u672C\u56DE\u5408\u9009\u62E9\u3002\u5E2D\u4F4D\u9274\u6743\uFF08\u7B2C 12 \u8F6E\uFF09\uFF1Ajoin_room \u4F1A\u8FD4\u56DE\u8BE5\u5EA7\u4F4D\u7684\u5E2D\u4F4D\u4EE4\u724C\uFF0C\u5BA2\u6237\u7AEF\u81EA\u52A8\u4FDD\u5B58\u5E76\u9644\u52A0\u5230\u4E4B\u540E\u6BCF\u4E2A\u8BF7\u6C42\uFF1B`seat` \u53C2\u6570\u4E0D\u518D\u4EE3\u8868\u8EAB\u4EFD\uFF0C\u6CA1\u6709\u4EE4\u724C\u53EA\u80FD\u770B\u65C1\u89C2\u89C6\u56FE\uFF08spectator=true\u3001legalActions \u6052\u4E3A\u7A7A\uFF09\u4E14\u4E0D\u80FD\u884C\u52A8\u3002\u770B\u5230 spectator=true \u6216 403 seat_token_required \u65F6\uFF0C\u91CD\u65B0 playground_join_room \u5165\u5EA7\u5373\u53EF\u3002\u5524\u9192\u6865\uFF08\u7B2C 14 \u8F6E\uFF09\uFF1A\u60F3\u88AB\u81EA\u52A8\u53EB\u9192\u5C31 playground_bind_session({roomId, sessionId: \u4F60\u7684 DSH_SESSION_ID})\uFF0C\u6216\u5728 create_room / join_room \u65F6\u76F4\u63A5\u4F20 sessionId\uFF1B\u7ED1\u5B9A\u540E\u8F6E\u5230 Agent \u65F6\u670D\u52A1\u7AEF\u4F1A\u4E3B\u52A8\u5524\u9192\u4F1A\u8BDD\uFF08\u4E0D\u662F\u81EA\u52A8\u51FA\u62DB\uFF0C\u4ECD\u9700\u4F60\u81EA\u5DF1\u8BFB\u76D8\u9762\uFF09\u3002\u5BF9\u5C40\u7ED3\u675F\u4E5F\u4F1A\u5524\u9192\u4E00\u6B21\uFF08reason=ended\uFF0C\u5E26\u7ED3\u7B97\u6587\u6848\uFF09\u2014\u2014\u4EBA\u7C7B\u8D62\u4E86\uFF0C\u4F60\u4E0D\u8BE5\u4E8B\u540E\u624D\u77E5\u9053\u3002\u5BF9\u5C40\u804A\u5929\uFF08\u7B2C 15 \u8F6E\uFF09\uFF1A\u6BCF\u4E00\u624B\u51FA\u62DB\u540E\u987A\u624B playground_say \u8BF4\u4E00\u53E5\uFF08\u2264200 \u5B57\uFF0C\u540C\u5EA7\u4F4D 800ms \u9650\u6D41\uFF09\u3002\u653E\u5634\u70AE\u3001\u62A5\u6218\u51B5\u3001\u5938\u5938\u4EBA\u7C7B\u90FD\u884C\uFF1B\u53EA\u95F7\u5934\u4E0B\u68CB\u7684\u8BDD\uFF0C\u4EBA\u7C7B\u4F1A\u89C9\u5F97\u5728\u8DDF\u673A\u5668\u5BF9\u5C40\u3002\u89C4\u5219\u8D44\u6E90\uFF1Aplayground://games/<gameId>/rules\uFF08grab / connect4 / yacht / rps-duel / battleship / reversi\uFF09\u3002\u5FEB\u8247\u9AB0\u5B50\uFF08yacht\uFF09\u7528 actionJson \u63D0\u4EA4\u4E09\u79CD\u52A8\u4F5C\uFF1A{"action":"roll"}\u3001{"action":"hold","indices":[0]}\uFF08\u4E00\u6B21\u53EA\u5207\u4E00\u9897\uFF0C[] \u5168\u89E3\u9501\uFF09\u3001{"action":"score","category":"..."}\uFF08\u8BB0\u5206\u6362\u624B\uFF09\u3002\u731C\u62F3\u5FC3\u7406\u6218\uFF08rps-duel\uFF09\u7528 actionJson \u63D0\u4EA4 {"action":"throw","shape":"rock"|"paper"|"scissors"}\uFF0C3 \u5C40\u5B9A\u80DC\u8D1F\u3001\u7B2C 3 \u5C40\u7FFB\u500D\uFF082 \u5206\uFF09\uFF0C\u53CC\u65B9\u90FD\u63D0\u4EA4\u540E\u624D\u63ED\u793A\u3002'
     }
   );
   registerTools(server);
@@ -31906,6 +32021,196 @@ var init_streamableHttp = __esm({
   }
 });
 
+// packages/server/src/wake.ts
+import { randomBytes as randomBytes2 } from "node:crypto";
+function wakeConfigFromEnv(env = process.env) {
+  const url = env.WAKE_URL?.trim();
+  if (!url) return null;
+  return { url, secret: env.WAKE_SECRET?.trim() ?? "" };
+}
+function sleep2(ms) {
+  return new Promise((resolve4) => setTimeout(resolve4, ms));
+}
+function describeError3(error2) {
+  if (error2 instanceof Error) {
+    const code = error2.cause?.code;
+    return code ? `${error2.name}: ${error2.message}\uFF08${code}\uFF09` : `${error2.name}: ${error2.message}`;
+  }
+  return String(error2);
+}
+function shouldWakeAgent(room) {
+  if (!room.wake) return false;
+  if (room.status !== "playing") return false;
+  if (room.game.meta.resolution === "turn") {
+    return (room.game.currentSeat?.(room.state) ?? null) === 1;
+  }
+  return room.pending[0] !== null && room.pending[1] === null;
+}
+function buildPayload(room, round, textView, sessionId, reason = "turn", resultText) {
+  const payload2 = {
+    roomId: room.id,
+    sessionId,
+    gameId: room.gameId,
+    round,
+    // 只给 Agent 视角的只读摘要：不含令牌、不含对手未揭示的动作。
+    textView: textView.slice(0, MAX_TEXT_VIEW_CHARS),
+    reason,
+    createdAt: Date.now(),
+    nonce: randomBytes2(8).toString("hex")
+  };
+  if (reason === "ended" && resultText) payload2.resultText = resultText.slice(0, 500);
+  return payload2;
+}
+async function postOnce(config2, payload2) {
+  try {
+    const response = await fetch(config2.url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "x-wake-secret": config2.secret
+      },
+      body: JSON.stringify(payload2),
+      signal: AbortSignal.timeout(WAKE_TIMEOUT_MS)
+    });
+    const text = await response.text().catch(() => "");
+    if (!response.ok) {
+      const detail = text.trim().slice(0, 200);
+      return {
+        ok: false,
+        status: response.status,
+        error: `HTTP ${response.status}${detail ? `\uFF1A${detail}` : ""}`
+      };
+    }
+    return { ok: true, status: response.status, error: null };
+  } catch (error2) {
+    return { ok: false, status: null, error: describeError3(error2) };
+  }
+}
+async function deliver(config2, payload2) {
+  const startedAt = Date.now();
+  let attempts = 0;
+  let lastError = null;
+  let status = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (attempt > 0) await sleep2(WAKE_RETRY_DELAY_MS);
+    attempts += 1;
+    const result = await postOnce(config2, payload2);
+    status = result.status;
+    if (result.ok) {
+      return { at: Date.now(), ok: true, attempts, status };
+    }
+    lastError = result.error;
+  }
+  return {
+    at: Date.now(),
+    ok: false,
+    error: lastError ?? "\u672A\u77E5\u9519\u8BEF",
+    attempts,
+    status
+  };
+}
+function dispatchWake(room, config2, payload2, key2, options, maxPerKey) {
+  const now = Date.now();
+  const previous = dedupe.get(room);
+  if (previous && previous.key === key2) {
+    if (now - previous.at < WAKE_DEDUPE_MS) return;
+    if (previous.count >= maxPerKey) return;
+  }
+  dedupe.set(room, {
+    key: key2,
+    at: now,
+    count: previous && previous.key === key2 ? previous.count + 1 : 1
+  });
+  if (config2.secret === "" && !warnedMissingSecret) {
+    warnedMissingSecret = true;
+    console.warn("[wake] \u672A\u914D\u7F6E WAKE_SECRET\uFF1A\u4ECD\u4F1A\u6295\u9012\uFF0C\u4F46\u63D2\u4EF6\u4FA7\u5F88\u53EF\u80FD\u4EE5 bad-secret \u62D2\u7EDD");
+  }
+  const task = deliver(config2, payload2).then((outcome) => {
+    wakeLog.push({
+      at: outcome.at,
+      roomId: payload2.roomId,
+      sessionId: payload2.sessionId,
+      round: payload2.round,
+      ok: outcome.ok,
+      attempts: outcome.attempts,
+      status: outcome.status,
+      error: outcome.ok ? null : outcome.error,
+      ms: outcome.at - now
+    });
+    if (wakeLog.length > WAKE_LOG_LIMIT) wakeLog.shift();
+    if (!outcome.ok) {
+      console.warn(
+        `[wake] \u5524\u9192\u5931\u8D25\uFF08\u4E0D\u5F71\u54CD\u5BF9\u5C40\uFF09\uFF1A\u623F\u95F4 ${payload2.roomId} \u7B2C ${payload2.round} \u56DE\u5408\uFF08${payload2.reason}\uFF09\u2192 ${outcome.error}`
+      );
+    }
+    try {
+      options.onResult?.(payload2.roomId, outcome);
+    } catch (error2) {
+      console.warn(`[wake] \u8BB0\u5F55\u5524\u9192\u8BCA\u65AD\u5931\u8D25\uFF1A${describeError3(error2)}`);
+    }
+  }).catch((error2) => {
+    console.warn(`[wake] \u6295\u9012\u4EFB\u52A1\u5F02\u5E38\uFF08\u5DF2\u5FFD\u7565\uFF09\uFF1A${describeError3(error2)}`);
+  });
+  inFlight.add(task);
+  void task.finally(() => {
+    inFlight.delete(task);
+  });
+}
+function scheduleAgentTurnWake(room, options = {}) {
+  const config2 = wakeConfigFromEnv(options.env);
+  if (config2 === null) return;
+  if (!shouldWakeAgent(room) || !room.wake) return;
+  let round;
+  let textView;
+  try {
+    const observation = room.game.observe(room.state, 1);
+    round = Number(observation.round);
+    textView = String(observation.textView ?? "");
+  } catch (error2) {
+    console.warn(`[wake] \u53D6 Agent \u89C2\u6D4B\u5931\u8D25\uFF0C\u8DF3\u8FC7\u5524\u9192\uFF08\u623F\u95F4 ${room.id}\uFF09\uFF1A${describeError3(error2)}`);
+    return;
+  }
+  if (!Number.isFinite(round)) return;
+  const payload2 = buildPayload(room, round, textView, room.wake.sessionId, "turn");
+  dispatchWake(room, config2, payload2, `${room.id}:${round}`, options, WAKE_MAX_PER_ROUND);
+}
+function scheduleRoomEndWake(room, options = {}) {
+  const config2 = wakeConfigFromEnv(options.env);
+  if (config2 === null) return;
+  if (!room.wake) return;
+  if (room.status !== "ended") return;
+  let round;
+  let textView;
+  try {
+    const observation = room.game.observe(room.state, 1);
+    round = Number(observation.round);
+    textView = String(observation.textView ?? "");
+  } catch (error2) {
+    console.warn(`[wake] \u53D6\u7ED3\u7B97\u89C2\u6D4B\u5931\u8D25\uFF0C\u8DF3\u8FC7\u7ED3\u675F\u5524\u9192\uFF08\u623F\u95F4 ${room.id}\uFF09\uFF1A${describeError3(error2)}`);
+    return;
+  }
+  if (!Number.isFinite(round)) return;
+  const resultText = room.result?.text;
+  const payload2 = buildPayload(room, round, textView, room.wake.sessionId, "ended", resultText);
+  dispatchWake(room, config2, payload2, `${room.id}:ended`, options, 1);
+}
+var WAKE_TIMEOUT_MS, WAKE_RETRY_DELAY_MS, WAKE_DEDUPE_MS, WAKE_MAX_PER_ROUND, WAKE_LOG_LIMIT, MAX_TEXT_VIEW_CHARS, wakeLog, dedupe, inFlight, warnedMissingSecret;
+var init_wake = __esm({
+  "packages/server/src/wake.ts"() {
+    "use strict";
+    WAKE_TIMEOUT_MS = 2e3;
+    WAKE_RETRY_DELAY_MS = 500;
+    WAKE_DEDUPE_MS = 3e3;
+    WAKE_MAX_PER_ROUND = 2;
+    WAKE_LOG_LIMIT = 50;
+    MAX_TEXT_VIEW_CHARS = 4096;
+    wakeLog = [];
+    dedupe = /* @__PURE__ */ new WeakMap();
+    inFlight = /* @__PURE__ */ new Set();
+    warnedMissingSecret = false;
+  }
+});
+
 // packages/server/src/discovery.ts
 function buildDescriptor(opts) {
   const base = opts.baseUrl.replace(/\/$/, "");
@@ -31949,6 +32254,7 @@ function buildDescriptor(opts) {
         "playground_list_games",
         "playground_create_room",
         "playground_join_room",
+        "playground_bind_session",
         "playground_wait_for_turn",
         "playground_get_state",
         "playground_submit_action",
@@ -31969,14 +32275,25 @@ function buildDescriptor(opts) {
       base: base + "/api",
       endpoints: {
         "GET /api/games": "\u6E38\u620F\u5217\u8868\u4E0E\u89C4\u5219\u5168\u6587",
-        "POST /api/rooms": '\u5EFA\u684C\uFF08body: {"gameId":"grab"|"connect4"|"yacht"|"rps-duel"|"battleship"|"reversi"}\uFF09\u2192 \u8FD4\u56DE roomId\u3001humanUrlPath\u3001seatTokens["0"]\uFF08\u4EBA\u7C7B\u5EA7\u7684\u4EE4\u724C\uFF09',
-        "POST /api/rooms/:id/join": '\u5165\u5EA7\uFF08body: {"seat":1} \u2192 \u53D1 1 \u53F7\u4F4D\u4EE4\u724C\uFF1B\u5DF2\u6709\u5EA7\u4F4D\u8981\u5E26 {"seat":0,"token":"<t>"}\uFF09',
+        "POST /api/rooms": '\u5EFA\u684C\uFF08body: {"gameId":"grab"|"connect4"|"yacht"|"rps-duel"|"battleship"|"reversi", "sessionId"?: "DSH \u4F1A\u8BDD id"}\uFF09\u2192 \u8FD4\u56DE roomId\u3001humanUrlPath\u3001seatTokens["0"]\uFF08\u4EBA\u7C7B\u5EA7\u7684\u4EE4\u724C\uFF09\uFF1B\u5E26 sessionId \u7B49\u4E8E\u5EFA\u684C\u540E\u7ACB\u5373\u7ED1\u5B9A\u5524\u9192\u4F1A\u8BDD',
+        "POST /api/rooms/:id/join": '\u5165\u5EA7\uFF08body: {"seat":1, "sessionId"?: "DSH \u4F1A\u8BDD id"} \u2192 \u53D1 1 \u53F7\u4F4D\u4EE4\u724C\uFF1B\u5DF2\u6709\u5EA7\u4F4D\u8981\u5E26 {"seat":0,"token":"<t>"}\uFF09',
+        "POST /api/rooms/:id/bind": '\u7ED1\u5B9A\u5524\u9192\u4F1A\u8BDD\uFF08body: {"sessionId":"<DSH_SESSION_ID>"}\uFF09\u2192 \u4E4B\u540E\u8F6E\u5230 Agent \u65F6\u670D\u52A1\u7AEF\u4E3B\u52A8 POST \u5524\u9192\u5B83\uFF1B\u5E42\u7B49\u53EF\u6539\u7ED1',
         "GET /api/rooms/:id/state?seat=1&token=<t>": "\u8BE5\u5EA7\u4F4D\u89C2\u6D4B\uFF08\u552F\u4E00\u8BFB\u6570\u51FA\u53E3\uFF09\uFF1B\u4E0D\u5E26\u4EE4\u724C = \u65C1\u89C2\u89C6\u56FE spectator=true",
         "POST /api/rooms/:id/action": '\u63D0\u4EA4\u52A8\u4F5C\uFF0Cbody \u91CC\u5E26 "token"\u3002grab: {"action":"grab","cell":[r,c]}\uFF1Bconnect4: {"action":"drop","column":n}\uFF1Byacht: {"action":"roll"} / {"action":"hold","indices":[i]} / {"action":"score","category":"..."}\uFF1Brps-duel: {"action":"throw","shape":"rock"|"paper"|"scissors"}\uFF1Bbattleship: {"action":"fire","cell":[r,c]}\uFF1Breversi: {"action":"place","cell":[r,c]}',
         "POST /api/rooms/:id/say": '\u6C14\u6CE1\u804A\u5929\uFF08body: {"seat":1,"text":"...","token":"<t>"}\uFF09',
         "GET /api/rooms/:id/result": "\u7ED3\u7B97",
         "GET /api/rooms/:id/log?seat=1": "\u5BF9\u5C40\u65E5\u5FD7\uFF08\u516C\u5F00\uFF1Bseed \u5728\u7EC8\u5C40\u540E\u624D\u516C\u5F00\uFF0C\u907F\u514D\u63D0\u524D\u9884\u6D4B\u9AB0\u5B50\uFF09"
       }
+    },
+    // 唤醒桥（第 14 轮）：平台在「轮到 Agent」时主动 POST 到 DSH 插件的 /wake。
+    // 这里只描述「谁该配什么」，不含任何 secret —— secret 只走环境变量。
+    wakeBridge: {
+      bindTool: "playground_bind_session",
+      bindVia: 'POST /api/rooms/:id/bind {"sessionId": "<DSH_SESSION_ID>"}\uFF08\u4E5F\u53EF\u5728 create_room / join_room \u65F6\u76F4\u63A5\u4F20 sessionId\uFF09',
+      diagnostics: "GET /api/rooms/:id \u7684 wake \u5B57\u6BB5\uFF1A{ boundSessionId, lastWakeAt, lastWakeError }\uFF08\u53EA\u8BFB\uFF09",
+      platformEnv: ["WAKE_URL\uFF08DSH \u63D2\u4EF6\u7684 /wake \u5730\u5740\uFF1B\u4E0D\u914D = \u529F\u80FD\u5173\u95ED\uFF09", "WAKE_SECRET\uFF08\u4E0E\u63D2\u4EF6\u4FA7\u914D\u7F6E\u4E00\u81F4\uFF0C\u901A\u8FC7 x-wake-secret \u5934\u53D1\u9001\uFF09"],
+      payload: "{ roomId, sessionId, gameId, round, textView, createdAt, nonce }",
+      delivery: "POST JSON + x-wake-secret\uFF1B\u8D85\u65F6 2s\u3001\u5931\u8D25\u91CD\u8BD5 1 \u6B21\uFF08\u95F4\u9694 500ms\uFF09\uFF1B\u540C\u4E00\u623F\u95F4+\u56DE\u5408 3 \u79D2\u5185\u53BB\u91CD\u3001\u6700\u591A 2 \u6B21\uFF1B\u5BF9\u5C40\u7ED3\u675F\u65F6\u4E0D\u53D1\uFF1B\u5931\u8D25\u53EA\u8BB0\u670D\u52A1\u7AEF\u65E5\u5FD7\uFF0C\u4E0D\u5F71\u54CD\u5BF9\u5C40"
     },
     rules: {
       all: base + "/api/games",
@@ -32020,8 +32337,8 @@ function buildLlmsTxt(opts) {
 
 - \u7AEF\u70B9\uFF1A${base}/mcp
 - \u4F20\u8F93\uFF1AStreamable HTTP\uFF08MCP \u5B98\u65B9\u89C4\u8303\uFF09\uFF0C\u65E0\u9700\u5728\u672C\u5730\u8D77 stdio \u8FDB\u7A0B
-- \u5DE5\u5177\uFF1Aplayground_create_room / playground_join_room / playground_wait_for_turn /
-  playground_get_state / playground_submit_action / playground_say /
+- \u5DE5\u5177\uFF1Aplayground_create_room / playground_join_room / playground_bind_session /
+  playground_wait_for_turn / playground_get_state / playground_submit_action / playground_say /
   playground_get_result / playground_export_log / playground_list_games
 - \u89C4\u5219\u8D44\u6E90\uFF1Aplayground://games/grab/rules \xB7 playground://games/connect4/rules \xB7 playground://games/yacht/rules \xB7 playground://games/rps-duel/rules \xB7 playground://games/battleship/rules \xB7 playground://games/reversi/rules
 
@@ -32056,6 +32373,24 @@ function buildLlmsTxt(opts) {
 - \u5EA7\u4F4D\u5DF2\u88AB\u5360\uFF080 \u53F7\u4F4D\u4ECE\u5EFA\u684C\u8D77\u5C31\u9884\u7559\uFF09\uFF0C\u53C8\u62FF\u4E0D\u51FA\u539F\u4EE4\u724C\uFF1A409 {"error":"seat_taken"}\u3002
 - \u540C\u4E00\u4E2A\u4EBA\u91CD\u8FDE\u65F6\u5E26\u539F\u4EE4\u724C\u518D join \u5373\u53EF\uFF08\u5E42\u7B49\uFF0C\u4EE4\u724C\u4E0D\u53D8\uFF09\uFF1B0 \u53F7\u4F4D\u4EE4\u724C\u4E0D\u80FD\u7528\u4E8E 1 \u53F7\u4F4D\uFF0C\u53CD\u4E4B\u4EA6\u7136\u3002
 - GET /api/rooms/{id}\uFF08summary\uFF09\u3001GET .../log\u3001WebSocket \u4E8B\u4EF6\u90FD\u662F\u516C\u5F00\u7684\uFF1Bsummary **\u4E0D\u4F1A**\u8FD4\u56DE\u4EE4\u724C\uFF0C\u522B\u53BB\u90A3\u91CC\u627E\u3002
+
+## \u{1F514} \u5524\u9192\u6865\uFF1A\u5148 bind_session\uFF0C\u4EBA\u7C7B\u843D\u5B50\u4F1A\u81EA\u52A8\u53EB\u4F60\uFF08\u7B2C 14 \u8F6E\uFF09
+
+DSH \u7684\u4F1A\u8BDD\u662F\u6D88\u606F\u9A71\u52A8\u7684\uFF1A\u56DE\u5408\u7ED3\u675F\u5C31\u4F11\u7720\uFF0C\u6D4F\u89C8\u5668\u91CC\u7684\u70B9\u51FB\u4E0D\u4F1A\u81EA\u52A8\u6CE8\u5165\u4F1A\u8BDD\u3002
+\u628A\u623F\u95F4\u7ED1\u5B9A\u5230\u4F60\u7684\u4F1A\u8BDD\u540E\uFF0C**\u8F6E\u5230 Agent \u65F6\u670D\u52A1\u7AEF\u4F1A\u4E3B\u52A8\u5524\u9192\u4F60**\uFF0C\u4E0D\u7528\u81EA\u5DF1\u5B9A\u95F9\u949F\u8F6E\u8BE2\u3002
+
+- \u7ED1\u5B9A\uFF08\u4E09\u9009\u4E00\uFF0C\u5E42\u7B49\uFF0C\u53EF\u6539\u7ED1\uFF09\uFF1A
+  - playground_bind_session({ roomId, sessionId })
+  - playground_create_room({ gameId, sessionId })
+  - playground_join_room({ roomId, seat: 1, sessionId })
+  - sessionId \u4E00\u822C\u5C31\u662F\u73AF\u5883\u53D8\u91CF DSH_SESSION_ID\uFF08\u5F62\u5982 session-xxxx\uFF09\uFF1B\u53EA\u5141\u8BB8 A-Za-z0-9._:-\uFF0C\u6700\u957F 128\u3002
+  - \u7EAF REST\uFF1APOST /api/rooms/{id}/bind  {"sessionId":"<DSH_SESSION_ID>"}
+- \u4EC0\u4E48\u65F6\u5019\u53EB\uFF1A**\u53EA\u5728\u4F60\u8BE5\u51FA\u62DB\u65F6**\u2014\u2014\u8F6E\u6D41\u5236\u7ED3\u7B97\u540E\u5F53\u524D\u884C\u52A8\u65B9\u662F\u4F60\uFF1B\u540C\u65F6\u6697\u9009\u91CC\u4EBA\u7C7B\u5DF2\u63D0\u4EA4\u3001\u4F60\u8FD8\u6CA1\u63D0\u4EA4\u3002
+  \u5BF9\u5C40\u7ED3\u675F\u3001\u8FD8\u6CA1\u8F6E\u5230\u4F60\u3001\u6CA1\u7ED1\u5B9A\u4F1A\u8BDD\uFF0C\u90FD\u4E0D\u4F1A\u53EB\u3002
+- \u53EB\u51E0\u6B21\uFF1A\u540C\u4E00\u300C\u623F\u95F4+\u56DE\u5408\u300D3 \u79D2\u5185\u4E0D\u91CD\u590D\uFF0C\u6700\u591A 2 \u6B21\uFF1B\u4E0D\u4F1A\u6258\u7BA1\u6574\u5C40\uFF0C\u4E5F\u4E0D\u4F1A\u66FF\u4F60\u51FA\u62DB\u3002
+- \u7ED1\u5B9A\u53EA\u51B3\u5B9A\u300C\u53EB\u9192\u8C01\u300D\uFF1A\u4E0D\u6539\u53D8\u5BF9\u5C40\u89C4\u5219\uFF0C\u4E5F\u4E0D\u5F71\u54CD\u5E2D\u4F4D\u4EE4\u724C\uFF1B\u5524\u9192\u5931\u8D25\u53EA\u8BB0\u670D\u52A1\u7AEF\u65E5\u5FD7\uFF0C\u4E0D\u5F71\u54CD\u5BF9\u5C40\u3002
+- \u6392\u67E5\uFF1AGET /api/rooms/{id} \u7684 wake: { boundSessionId, lastWakeAt, lastWakeError } \u662F\u53EA\u8BFB\u8BCA\u65AD\u5B57\u6BB5\u3002
+  \u5E73\u53F0\u4FA7\u9700\u8981\u914D WAKE_URL\uFF08\u63D2\u4EF6 /wake \u5730\u5740\uFF09\u4E0E WAKE_SECRET\uFF1B**\u4E0D\u914D = \u529F\u80FD\u5173\u95ED**\uFF0C\u884C\u4E3A\u4E0E\u4EE5\u524D\u5B8C\u5168\u4E00\u81F4\u3002
 
 ## \u5907\u9009\uFF1A\u76F4\u63A5\u7528 REST
 
@@ -32133,6 +32468,20 @@ __export(server_exports, {
 import { createServer as createServer2 } from "node:http";
 import { existsSync as existsSync2, readFileSync as readFileSync2, statSync } from "node:fs";
 import { extname, join as join2, normalize, resolve as resolve2 } from "node:path";
+function notifyAgentTurn(roomId) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+  scheduleAgentTurnWake(room, {
+    onResult: (id, outcome) => rooms.noteWakeResult(id, outcome)
+  });
+}
+function notifyRoomEnd(roomId) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+  scheduleRoomEndWake(room, {
+    onResult: (id, outcome) => rooms.noteWakeResult(id, outcome)
+  });
+}
 function json2(res, status, body) {
   const data = JSON.stringify(body);
   res.writeHead(status, {
@@ -32190,7 +32539,7 @@ function statusOf(err) {
   if (err instanceof SeatTokenRequiredError) return 403;
   if (err instanceof SeatTakenError) return 409;
   const msg = String(err?.message ?? "");
-  if (/seat|文本|太快|未知游戏|JSON/.test(msg)) return 400;
+  if (/seat|sessionId|文本|太快|未知游戏|JSON/.test(msg)) return 400;
   if (/房间不存在/.test(msg)) return 404;
   return 500;
 }
@@ -32270,7 +32619,10 @@ async function handleApi(req, res, parts) {
       return true;
     }
     try {
+      const sessionId = body.sessionId === void 0 ? null : normalizeSessionId(body.sessionId);
       const room = rooms.create(gameId);
+      if (sessionId !== null) rooms.bindWake(room.id, sessionId);
+      notifyAgentTurn(room.id);
       const humanToken = room.seatTokens[0];
       json2(res, 200, {
         roomId: room.id,
@@ -32279,6 +32631,8 @@ async function handleApi(req, res, parts) {
         agentSeat: 1,
         // 令牌的另一份副本：前端 / MCP 客户端据此保存 0 号位凭据
         seatTokens: { 0: humanToken },
+        // 建桌时顺带绑定的唤醒会话（没传就为 null，行为与加唤醒桥之前一致）。
+        wake: sessionId === null ? null : { boundSessionId: sessionId },
         rules: room.game.meta.rules
       });
     } catch (err) {
@@ -32300,11 +32654,11 @@ async function handleApi(req, res, parts) {
     if (method === "POST" && sub === "join") {
       const body = await readBody(req);
       try {
-        const joined = rooms.join(
-          roomId,
-          parseSeat(body.seat, { required: true }),
-          tokenFrom(req, body.token)
-        );
+        const seat = parseSeat(body.seat, { required: true });
+        const sessionId = body.sessionId === void 0 ? null : normalizeSessionId(body.sessionId);
+        const joined = rooms.join(roomId, seat, tokenFrom(req, body.token));
+        if (sessionId !== null) rooms.bindWake(roomId, sessionId);
+        notifyAgentTurn(roomId);
         json2(res, 200, {
           ok: true,
           seat: joined.seat,
@@ -32313,6 +32667,22 @@ async function handleApi(req, res, parts) {
         });
       } catch (err) {
         sendError(res, err);
+      }
+      return true;
+    }
+    if (method === "POST" && sub === "bind") {
+      const body = await readBody(req);
+      try {
+        const binding = rooms.bindWake(roomId, normalizeSessionId(body.sessionId));
+        notifyAgentTurn(roomId);
+        json2(res, 200, {
+          ok: true,
+          roomId,
+          sessionId: binding.sessionId,
+          boundAt: binding.boundAt
+        });
+      } catch (err) {
+        sendError(res, err, { ok: false });
       }
       return true;
     }
@@ -32329,15 +32699,19 @@ async function handleApi(req, res, parts) {
     if (method === "POST" && sub === "action") {
       const body = await readBody(req);
       try {
+        const seat = parseSeat(body.seat, { required: true });
         const result = rooms.submit(
           roomId,
-          parseSeat(body.seat, { required: true }),
+          seat,
           body.action ?? {},
           tokenFrom(req, body.token)
         );
         if (result.error) {
           json2(res, 409, { ok: false, error: result.error, legalActions: result.legalActions ?? [] });
         } else {
+          const after = rooms.get(roomId);
+          if (after?.status === "ended") notifyRoomEnd(roomId);
+          else if (seat === 0) notifyAgentTurn(roomId);
           json2(res, 200, { ok: true, resolved: result.resolved, events: result.events });
         }
       } catch (err) {
@@ -32622,6 +32996,7 @@ var init_server3 = __esm({
     init_src2();
     init_streamableHttp();
     init_rooms();
+    init_wake();
     init_discovery();
     PORT = Number(process.env.PORT ?? 8787);
     HOST = process.env.HOST ?? "127.0.0.1";

@@ -1,5 +1,5 @@
 platform version: 0.1.0
-vendored at: 2026-10-29T12:20:27.288Z
+vendored at: 2026-10-30T11:07:14.964Z
 source project: ai-playground (https://github.com/Treasure-hub-agent/ai-playground)
 
 更新方式：在平台仓库跑 node scripts/pack-cli.mjs，回到本仓库跑 node scripts/vendor-app.mjs

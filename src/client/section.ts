@@ -77,6 +77,7 @@ export function makeSection(rt: SectionRuntime) {
     const [dirty, setDirty] = useState(false);
     const [showLogs, setShowLogs] = useState(false);
     const [showConfig, setShowConfig] = useState(false);
+    const [showWake, setShowWake] = useState(false);
     const [now, setNow] = useState(() => Date.now());
     const aliveRef = useRef(true);
 
@@ -181,10 +182,14 @@ export function makeSection(rt: SectionRuntime) {
     const running = status === 'running';
     const transitioning = status === 'starting' || status === 'stopping';
     const uptime = running && state?.startedAt ? formatUptime(now - state.startedAt) : null;
+    // 外部实例 = 端口上本来就有游戏厅（不是插件起的）：绿灯、能玩，但**没有停止按钮**，
+    // 因为杀别人起的进程是不可逆副作用，插件只负责说明。
+    const external = state?.owner === 'external';
 
     let meta = state?.url ?? '尚未配置';
     if (running) {
       const bits: string[] = [];
+      if (external) bits.push('外部实例运行中');
       if (state?.health.games != null) bits.push(`${state.health.games} 款游戏`);
       if (state?.health.latencyMs != null) bits.push(`${state.health.latencyMs}ms`);
       if (uptime) bits.push(`已运行 ${uptime}`);
@@ -287,15 +292,23 @@ export function makeSection(rt: SectionRuntime) {
     const chips = h(
       'div',
       { className: 'wa-chips' },
+      // 外部实例没有「停止」：插件不负责停别人起的进程（这里不是省事，是边界）
       running &&
+        !external &&
         chip(busy === 'stop' ? '正在停止…' : '⏹ 停止', () => void act('stop'), {
           danger: true,
           disabled: busy !== null,
         }),
-      (running || status === 'failed') &&
+      (running && !external || status === 'failed') &&
         chip(busy === 'restart' ? '重启中…' : '⟳ 重启', () => void act('restart'), { disabled: busy !== null }),
       running && chip('复制地址', () => void copy(state?.url ?? '', '地址')),
       running && chip('复制 MCP', () => void copy(mcpJson, ' MCP 配置')),
+      // 「用户自己起游戏厅」的场景：这两行直接塞进平台的环境变量就能用
+      state?.wake
+        ? chip('🔔 复制唤醒配置', () =>
+            void copy(`WAKE_URL=${state.wake.url}\nWAKE_SECRET=${state.wake.secret}`, '唤醒配置'),
+          )
+        : null,
     );
 
     const statusLine = h(
@@ -423,6 +436,107 @@ export function makeSection(rt: SectionRuntime) {
         )
       : null;
 
+    // ── 唤醒桥：平台该填什么、上次叫醒成没成 ────────────────────────────────
+    // 这块是「排查面」而不是操作面：平时折起来，出问题时一眼能看出是鉴权、会话不可用还是去抖。
+    const wake = state?.wake;
+    const wakeReady = wake?.available === true;
+    const wakeFold = wake
+      ? h(
+          'div',
+          { className: 'wa-fold' },
+          h(
+            'div',
+            {
+              className: `wa-fold-head${showWake ? ' is-open' : ''}`,
+              onClick: () => setShowWake(!showWake),
+            },
+            h('span', { className: 'wa-chev' }, '▶'),
+            h('span', null, `🔔 唤醒桥${wakeReady ? '' : ' · 不可用'}`),
+            wake.delivered > 0 || wake.failed > 0
+              ? h('span', { className: 'wa-status-meta' }, `· 成功 ${wake.delivered} / 失败 ${wake.failed}`)
+              : null,
+          ),
+          showWake
+            ? h(
+                'div',
+                { className: 'wa-fold-body' },
+                h(
+                  'div',
+                  { className: 'wa-source' },
+                  h('span', { className: 'wa-source-icon' }, '📡'),
+                  h(
+                    'span',
+                    null,
+                    wakeReady
+                      ? `就绪 · source.kind=${wake.sourceKind}`
+                      : '宿主没提供 sessionController / sessions，唤醒不可用（插件其它功能正常）',
+                  ),
+                ),
+                h(
+                  'div',
+                  { className: 'wa-chips' },
+                  chip('复制唤醒地址', () => void copy(wake.url, '唤醒地址')),
+                  chip('复制密钥', () => void copy(wake.secret, '唤醒密钥')),
+                ),
+                h(
+                  'div',
+                  { className: 'wa-source' },
+                  h('span', { className: 'wa-source-icon' }, '🔗'),
+                  h('span', null, wake.url),
+                ),
+                h(
+                  'div',
+                  { className: 'wa-source' },
+                  h('span', { className: 'wa-source-icon' }, '🔑'),
+                  h('span', null, wake.secretSource === 'env' ? `${wake.secret}（环境变量 WHALE_WAKE_SECRET）` : wake.secret),
+                ),
+                wake.lastDeliveredAt
+                  ? h(
+                      'div',
+                      { className: 'wa-status-meta' },
+                      `上次叫醒：${wake.lastDeliveredAt}${wake.lastRoom ? ` · 房间 ${wake.lastRoom} 第 ${wake.lastRound ?? '?'} 回合` : ''}`,
+                    )
+                  : h('div', { className: 'wa-status-meta' }, '还没被平台叫醒过（先在平台侧绑定 sessionId）'),
+                wake.debounced > 0
+                  ? h('div', { className: 'wa-status-meta' }, `去抖吞掉 ${wake.debounced} 次重复请求（同房间同回合 3 秒内）`)
+                  : null,
+                wake.lastError ? h('div', { className: 'wa-error' }, `上次失败：${wake.lastError}`) : null,
+              )
+            : null,
+        )
+      : null;
+
+    // ── MCP 自注册：写成功了给一行提示；写失败才展开「手动添加」块 ─────────────
+    const mcp = state?.mcp;
+    const mcpNotice =
+      mcp && mcp.action === 'failed'
+        ? h(
+            'div',
+            { className: 'wa-fold' },
+            h(
+              'div',
+              { className: 'wa-fold-head is-open' },
+              h('span', { className: 'wa-chev' }, '▶'),
+              h('span', null, '🧩 MCP 条目没接上 · 可手动添加'),
+            ),
+            h(
+              'div',
+              { className: 'wa-fold-body' },
+              h('div', { className: 'wa-error' }, mcp.detail),
+              mcp.path ? h('div', { className: 'wa-status-meta' }, `目标文件：${mcp.path}`) : null,
+              h('div', { className: 'wa-chips' }, chip('复制配置块', () => void copy(mcp.snippet, ' YAML 块'))),
+              h('pre', { className: 'wa-logs' }, mcp.snippet || '（无内容）'),
+            ),
+          )
+        : mcp && mcp.action === 'written'
+          ? h(
+              'div',
+              { className: 'wa-source' },
+              h('span', { className: 'wa-source-icon' }, '🧩'),
+              h('span', null, mcp.detail),
+            )
+          : null;
+
     // ── 日志折叠区 ────────────────────────────────────────────────────────
     const logs = state?.logs ?? [];
     const logsFold = h(
@@ -475,6 +589,15 @@ export function makeSection(rt: SectionRuntime) {
           { className: 'wa-body' },
           statusLine,
           status === 'failed' && state?.error ? h('div', { className: 'wa-error' }, state.error) : null,
+          // 外部实例：绿灯但必须说清楚「这不是插件起的、插件不负责停」
+          external && state?.notice
+            ? h(
+                'div',
+                { className: 'wa-source' },
+                h('span', { className: 'wa-source-icon' }, '🔌'),
+                h('span', null, state.notice),
+              )
+            : null,
           fatal ? h('div', { className: 'wa-error' }, `插件接口不可用：${fatal}`) : null,
           stats,
           cta,
@@ -482,6 +605,8 @@ export function makeSection(rt: SectionRuntime) {
           toast ? h('div', { className: 'wa-notice' }, toast) : null,
           h('div', { className: 'wa-source' }, h('span', { className: 'wa-source-icon' }, '📦'), h('span', null, sourceText)),
           configFold,
+          wakeFold,
+          mcpNotice,
           logsFold,
           state?.pluginVersion
             ? h('div', { className: 'wa-plate' }, `WHALE ARCADE · NO.${state.pluginVersion}`)

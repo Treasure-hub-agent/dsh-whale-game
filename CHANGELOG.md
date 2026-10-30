@@ -2,6 +2,43 @@
 
 > npm 包名是 `dsh-whale-game`（`dsh-whale-arcade` 已被另一个 DSH 插件占用）；中文名一直是「大肥鱼游戏厅」。
 
+## 0.1.3 — 待发布（2026-10-29）
+
+**唤醒桥 + 桌面集成**：人类在浏览器落子后，Agent 会被自动叫醒出一手（不用再手搓提醒）。
+
+- **默认不自启（2026-10-30 调整）**：`DEFAULT_CONFIG.autoStart` 由 `true` 改为 `false`。
+  后台常驻服务属于「用户该知情并选择」的行为，不该装完插件就悄悄占端口；需要自启就在气泡
+  「运行设置 → 随 DSH 启动」里自行打开。唤醒桥不受影响：游戏厅没起时 MCP 客户端会持续重试，
+  用户点「开启游戏厅」后自动接上。已写进 `src/shared.ts` 的注释与 README。
+
+- 新增 `POST /whale-arcade/wake`（`src/host/wake.ts`）：`x-wake-secret` 鉴权（常量时间比较）、
+  `roomId`/`sessionId` 形状校验、同 `roomId+round` 3 秒去抖，错误码 `bad-secret` / `bad-request` /
+  `session-unavailable`。投递照抄官方 `dsh-schedule`：`resolveAgent → createUserMessage →
+  agent.followup → sessions.flush`。
+- `source.kind` 首选 `'wake'`（`createUserMessage` 无运行时校验，`MessageSourceMap` 只是类型层）；
+  并且做了**自动降级**：`followup` 不被接受时改用官方在用的 `'schedule'` 重投一次并记住；
+  `flush` 失败绝不重试，避免同一回合叫醒两次。
+- 消息文案 ≤2KB，超长时只截盘面摘要，保留头（房间/游戏/回合）与尾（「只出一手、不要猜」）。
+- **spawn 时自动给游戏厅注入 `WAKE_URL` / `WAKE_SECRET`**（`DSH_WEB_URL` + 当前生效密钥），
+  平台侧不用人肉配环境变量、secret 与插件校验值天然一致；取不到地址时**不注入**并在日志说明。
+- 设置页新增一键复制的「🔔 复制唤醒配置」（两行环境变量，给「自己起游戏厅」的场景）。
+- **`autoStart` 默认改为 true**，并用 `spawn(..., { detached: true, windowsHide: true,
+  stdio: 'ignore' })` 拉起——普通 spawn / `Start-Process` 派的进程会被 DSH 退出时的 Ctrl+C
+  顺着进程树带走（已实测）；detached 之后游戏厅在 DSH 退出后仍存活。
+  相应地，插件卸载时**不再杀**自启的游戏厅（否则优雅退出时 disposer 会把「存活」特性抵消掉）；
+  要停请点气泡里的「停止」。
+- 端口已有游戏厅时不再报「启动失败」，而是识别成「**外部实例运行中**」：绿灯、能玩、
+  界面说明「插件不负责停止」，`/stop` 只放手、不发任何 kill。
+- **MCP 自注册**：激活时确保 `$DSH_HOME/profiles/<profile>/cordis.patch.yml` 里有
+  `id: mcp-ai-playground` 的 `- insert:` 块。已有则一个字节不动；缺失则先备份
+  `.bak-<时间戳>` 再追加带 `# BEGIN/END dsh-whale-game` 标记的块；任何异常都不抛，
+  降级为设置页里一条可复制的「手动添加」提示。
+- 设置页新增：外部实例说明、🔔 唤醒桥折叠区（端点/密钥/当前 `source.kind`/上次投递/去抖计数）、
+  MCP 失败时的 YAML 块复制。
+- 测试：`pnpm check` = 构建 + 静态自检 + 24 条 `node:test` 单测 + 类型检查。单测覆盖
+  鉴权失败、形状校验、3 秒去抖、会话不可用降级、`source.kind` 降级、2KB 截断、
+  自注册幂等与备份、外部实例不 kill。全程临时 `DSH_HOME`，不碰真实 profile。
+
 ## 0.1.2 — 2026-10-29
 
 **内置本体更新到修过的版本**（平台侧 `3141e59`）。起因是一次真实对局：Agent 的工具列表里没有

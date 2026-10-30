@@ -81,8 +81,81 @@ LLM 的出招常有惯性——你能摸出它的习惯，也能练自己的不�
 
 - **一键起停**游戏厅；进程起来不算数——真等到 `/api/games` 有响应才点亮绿灯，运行期每 5 秒复检
 - **复制地址**给人类浏览器、**复制 MCP 配置**给 Agent，一次配好
-- **随 DSH 自启**（可选）；插件被禁用或 DSH 退出时连同进程树一起收掉，不留孤儿端口
+- **随 DSH 自启**（默认开）；游戏厅是 detached 独立进程，**DSH 退出或插件卸载都不会带走它**——
+  要停点气泡里的「⏹ 停止」（或 `taskkill /pid <pid> /T /F`）
+- **唤醒桥**：人类落子后由平台 POST 过来，把 Agent 会话叫醒（见下一节）
+- **MCP 自注册**：首次激活时自动把 `mcp-ai-playground` 条目写进 profile 的 `cordis.patch.yml`
 - 侧栏收起（rail 模式）时细条只剩 🎮，不占地方
+
+> 自启用的是 `detached` 方式（`spawn(..., { detached: true, windowsHide: true, stdio: 'ignore' })`）：
+> 游戏厅自成进程组，**DSH 退出后它照常活着**（这就是 detached 的目的；插件卸载时也不会去杀它）。
+> 下次激活时插件发现端口已被占用，会把它识别成「外部实例」——绿灯、能玩、但**不负责停止**
+> （杀别人起的进程是不可逆副作用）。
+
+## 唤醒桥：人类落子自动叫醒 Agent
+
+DSH 的会话是消息驱动的：回合结束就休眠，浏览器里点击落子**不会**唤醒 Agent。
+所以平台（AI 游乐场）在「轮到 Agent」时往插件 POST 一条请求，插件往目标会话里塞一条
+`user` 消息，把它叫醒。实现照抄官方 `@deepseek-ai/dsh-schedule` 的投递姿势：
+`sessionController.resolveAgent` → `createUserMessage` → `agent.followup` → `sessions.flush`。
+
+**契约**
+
+```http
+POST http://127.0.0.1:<DSH 端口>/whale-arcade/wake
+x-wake-secret: <$DSH_HOME/whale-arcade/config.json 里的 wakeSecret，或环境变量 WHALE_WAKE_SECRET>
+content-type: application/json
+```
+
+```json
+{ "roomId": "liovi0", "sessionId": "session-2fbf0714-…", "gameId": "grab", "gameName": "抢宝大作战",
+  "round": 3, "rounds": 9, "textView": "…盘面摘要…" }
+```
+
+| 情况 | 状态码 | `error` |
+|---|---|---|
+| 头缺失 / 不匹配（常量时间比较） | 401 | `bad-secret` |
+| body 不是 JSON，或 `roomId`/`sessionId` 不符合 `[A-Za-z0-9._:-]{1,128}`、`round > rounds` | 400 | `bad-request` |
+| `resolveAgent` 报错 / 会话没落盘 / 宿主没提供相关服务 | 409 | `session-unavailable` |
+| 成功 | 200 | — |
+
+成功响应：`{ ok: true, deliveredAt, sessionId, sourceKind, roomId, round, messageId }`；
+同一 `roomId+round` 在 3 秒内重复请求会返回 `{ ok: true, deduped: true, deliveredAt: <首次投递时间> }`。
+
+消息文案（人类可见，总长 ≤ 2KB，超长只截盘面、头尾指令保留）：
+
+```text
+🎮 该你出招了 · 房间 liovi0 · 抢宝大作战 · 第 3/9 回合
+<textView 摘要>
+读完盘面直接 submit_action；不要猜对手本回合的选择，不要托管整局。
+```
+
+**`source.kind` 选型依据（实测 + 代码证据）**
+
+- 首选 `'wake'`：`createUserMessage` 是纯构造器（`dsh-llm` 的 `lib/types/message.js` 里只是
+  `{ ...input, role: 'user', id: randomUUID() }` 再深冻结），**没有任何运行时校验**；
+  `MessageSourceMap` 只是类型层联合，不参与校验。所以 `kind: 'wake'` 不会被拒绝。
+- 但客户端 transcript 渲染可能只认识已知的 kind，所以留了自动降级：投递失败（`followup` 抛错，
+  即消息没被接受）时会立刻改用官方在用的 `'schedule'` 重投一次，并把这个选择**粘住**
+  （后续唤醒直接用 `'schedule'`，设置页能读到当前值）。`flush` 阶段失败**绝不重试**——
+  那可能是「消息已进会话、只是没落盘」，重试会让同一回合被叫醒两次。
+
+**平台侧怎么接**：先 `playground_bind_session({ roomId, sessionId })` 绑定会话，然后平台需要两个环境变量：
+
+```text
+WAKE_URL=http://127.0.0.1:<DSH 端口>/whale-arcade/wake
+WAKE_SECRET=<密钥>
+```
+
+- **插件自己起的游戏厅不用管这两行**：插件 spawn 时会自动注入（取 `DSH_WEB_URL` 拼地址、
+  密钥用当前生效值，所以天然一致）。拿不到地址时**不注入**、不猜端口，只在日志里说一声。
+- **自己起的游戏厅**：气泡里点「🔔 复制唤醒配置」，粘贴的就是这两行。
+- 密钥首次运行随机生成并落盘（`$DSH_HOME/whale-arcade/config.json` 的 `wakeSecret`）；
+  环境变量 `WHALE_WAKE_SECRET` 可覆盖，设置页显示的是当前生效值。
+
+平台侧 body 用的是它自己的观测：`{ roomId, sessionId, gameId, round, textView, createdAt, nonce }`。
+插件只把 `roomId/round` 当去重键，**不判断棋局语义**（不决定该不该叫、也不管 round 是手数还是局数）；
+`createdAt` / `nonce` 容忍但不使用。
 
 ## 装
 
@@ -153,10 +226,17 @@ dsh plugin --profile desktop add link:$(pwd)
 | 现象 | 多半是 |
 |---|---|
 | 侧栏没有 🎮 | 插件没装上或没重启 DSH；看 DevTools 控制台有无 `dsh-whale-game` 报错 |
-| 一直「正在拉起…」后失败 | 端口被占；或你在 ⚙ 运行设置里改过命令且命令不对（清空即回到自带本体） |
+| 一直「正在拉起…」后失败 | 端口被别的程序占着；或你在 ⚙ 运行设置里改过命令且命令不对（清空即回到自带本体） |
+| 绿灯 + 「外部实例运行中」 | 端口上已经有一个不是插件起的游戏厅（开发者手动开的、上次 detached 自启留下的）。能玩；要停请去启动它的地方停，插件不会 kill 别人的进程 |
 | 提示本体不可用 | 插件包被裁剪过（比如只装了 lib/）；重新 dsh plugin add dsh-whale-game |
 | 绿灯但打不开 | 端口填错了；改完记得点「保存」再重开 |
+| 气泡里「🔔 唤醒桥 · 不可用」 | 宿主没提供 `sessionController` / `sessions` 服务：插件其它功能正常，只是叫不醒 Agent |
+| 气泡里「🧩 MCP 条目没接上」 | 自动写 profile 配置失败（权限/路径/半截标记块）。展开就有可复制的 YAML 块，手动贴进 `$DSH_HOME/profiles/<profile>/cordis.patch.yml` 即可 |
 | **DSH 起不来** | DSH 是全有或全无启动。从 profile 的依赖与 `dsh.profile.bundles` 里删掉 `dsh-whale-game`，`pnpm -C "$DSH_HOME/profiles/desktop" install`，再重启 |
+
+> 自动写 profile 配置只在**缺条目**时发生一次：先备份 `cordis.patch.yml.bak-<时间戳>`，
+> 再追加带 `# BEGIN/END dsh-whale-game` 标记的 `- insert:` 块；已有条目则一个字节都不动。
+> 写失败不会让插件起不来，只会退化成上面那条「手动添加」提示。
 
 崩溃日志在 `%APPDATA%\@deepseek-ai\dsh-desktop\logs\crash-*.log`（Windows）
 或 `~/.config/@deepseek-ai/dsh-desktop/logs/`（Linux/macOS），会直接点名哪个插件挂了。
@@ -165,10 +245,13 @@ dsh plugin --profile desktop add link:$(pwd)
 
 ```bash
 pnpm install
-pnpm check          # 构建 + 10 项静态自检 + 类型检查
-pnpm e2e           # 用自带本体：真起服务 → 健康检查 → 停 → 验端口释放
+pnpm check          # 构建 + 静态自检 + 单测（唤醒桥/MCP 自注册/外部实例）+ 类型检查
+pnpm test           # 只跑 node:test 单测（鉴权 / 去抖 / 会话不可用降级 / 自注册幂等与备份）
+pnpm e2e            # 用自带本体：真起服务 → 健康检查 → 停 → 验端口释放
 pnpm e2e -- /path/to/ai-playground    # 用本机平台源码跑同一条链路
 ```
+
+> 单测全程在临时 `DSH_HOME` 里跑，**不碰真实 profile**，也不需要重启 DSH。
 
 **本体怎么更新**：插件里的 `vendor/app/` 是从平台仓库同步来的构建产物（`dist` + `web`），不是手写代码。平台发新版后：
 

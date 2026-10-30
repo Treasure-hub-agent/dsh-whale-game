@@ -11,7 +11,7 @@
  *   node scripts/e2e-local.mjs            # 用插件自带的 vendor/app（默认路径，零网络）
  *   node scripts/e2e-local.mjs <平台仓库>  # 用本机 AI 游乐场源码（AI_PLAYGROUND_REPO 亦可）
  */
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
@@ -25,6 +25,14 @@ if (useRepo && !existsSync(join(repo, 'packages', 'cli', 'src', 'index.ts'))) {
 const port = 8907;
 const dataHome = mkdtempSync(join(tmpdir(), 'whale-arcade-e2e-'));
 process.env.DSH_HOME = dataHome;
+// autoStart 默认已改成 true；联调用例自己控制起停，先落一份 autoStart:false 的配置，
+// 否则 bootstrap 会立刻去拉 8787（本机真有游戏厅时会污染这次运行的状态）。
+mkdirSync(join(dataHome, 'whale-arcade'), { recursive: true });
+writeFileSync(
+  join(dataHome, 'whale-arcade', 'config.json'),
+  JSON.stringify({ port, autoStart: false }),
+  'utf8',
+);
 
 let failed = 0;
 const ok = (label) => console.log(`  ✓ ${label}`);
@@ -37,7 +45,9 @@ const assert = (cond, label, detail) => (cond ? ok(label) : bad(label, detail));
 const host = await import('../lib/index.js');
 let route = null;
 host.apply({
-  webServer: { register: (spec) => (route = spec) },
+  webServer: { register: (spec) => (route = spec), getOrigin: () => 'http://127.0.0.1:52183' },
+  // 不回调 = 模拟「宿主没提供 sessionController/sessions」，唤醒桥按降级路径走
+  inject() {},
   effect: (factory) => {
     const dispose = factory();
     return () => (typeof dispose === 'function' ? dispose() : undefined);

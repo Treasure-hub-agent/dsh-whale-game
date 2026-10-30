@@ -7,7 +7,7 @@
  *   浏览器半侧：是普通副作用脚本；调用 __ModuleLoader__.load；factory 返回 { name, inject, apply }；
  *               apply 注册了 sidebar.footer.action 与 shell.overlay 两个插槽
  */
-import { readFileSync, rmSync, mkdtempSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
@@ -28,13 +28,19 @@ assert(hostMod.name === 'whale-arcade', 'name 正确', hostMod.name);
 assert(Array.isArray(hostMod.inject) && hostMod.inject.includes('webServer'), 'inject 声明了 webServer', JSON.stringify(hostMod.inject));
 assert(typeof hostMod.apply === 'function', 'apply 是函数');
 
-// 假的 webServer：把注册进来的 handler 抓出来
+// 假的 webServer：把注册进来的 handler 抓出来。
+// inject(deps, cb) 故意**不**回调：模拟「宿主没提供 sessionController/sessions」，
+// 于是唤醒桥降级为不可用（这是必须验的降级路径，不能让插件在这里挂掉）。
 let route = null;
 const fakeCtx = {
   webServer: {
     register(spec) {
       route = spec;
     },
+    getOrigin: () => 'http://127.0.0.1:52183',
+  },
+  inject() {
+    // 不回调 = 服务没就绪
   },
   effect(factory) {
     // 模拟 cordis：立刻执行并持有 disposer
@@ -46,6 +52,13 @@ const fakeCtx = {
 // 数据目录指到临时目录，别写进真实 $DSH_HOME
 const dataHome = mkdtempSync(join(tmpdir(), 'whale-arcade-smoke-'));
 process.env.DSH_HOME = dataHome;
+// autoStart 默认是 true；自检环境里必须关掉，否则会真去 8787 拉起游戏厅（污染本机）。
+mkdirSync(join(dataHome, 'whale-arcade'), { recursive: true });
+writeFileSync(
+  join(dataHome, 'whale-arcade', 'config.json'),
+  JSON.stringify({ port: 8787, autoStart: false }),
+  'utf8',
+);
 
 hostMod.apply(fakeCtx);
 await new Promise((r) => setTimeout(r, 50));
@@ -54,12 +67,13 @@ assert(route !== null && route.kind === 'prefix', '注册了 prefix 路由', JSO
 assert(route?.path === '/whale-arcade', '路由前缀正确', route?.path);
 
 if (route) {
-  const call = async (method, path, body) => {
+  const call = async (method, path, body, headers = {}) => {
     let status = 200;
     let payload = '';
     const req = {
       method,
       url: path,
+      headers,
       async *[Symbol.asyncIterator]() {
         if (body !== undefined) yield Buffer.from(JSON.stringify(body));
       },
@@ -96,6 +110,42 @@ if (route) {
 
   const nope = await call('GET', '/whale-arcade/nope');
   assert(nope.status === 404, '未知路由 404');
+
+  // ── 唤起桥 + 桌面集成：状态形状与降级路径 ──────────────────────────────
+  const shape = await call('GET', '/whale-arcade/status');
+  const st = shape.body?.state;
+  assert(typeof st?.wake?.secret === 'string' && st.wake.secret.length >= 32, '首次运行生成唤醒密钥（≥32 位）');
+  assert(st?.wake?.available === false, '没有 sessionController 时唤醒桥降级为不可用');
+  assert(/\/whale-arcade\/wake$/.test(st?.wake?.url ?? ''), '唤醒地址指向本站', st?.wake?.url);
+  assert(st?.owner === null, '未启动时 owner 为 null', String(st?.owner));
+  assert(
+    ['present', 'written', 'failed', 'skipped'].includes(st?.mcp?.action),
+    'MCP 自注册有明确结果',
+    String(st?.mcp?.action),
+  );
+
+  const noSecret = await call('POST', '/whale-arcade/wake', { roomId: 'room1', sessionId: 'session1' });
+  assert(noSecret.status === 401 && noSecret.body?.error === 'bad-secret', '缺 x-wake-secret 时 401', String(noSecret.status));
+  const badSecret = await call('POST', '/whale-arcade/wake', { roomId: 'room1', sessionId: 'session1' }, { 'x-wake-secret': 'wrong' });
+  assert(badSecret.status === 401, '错密钥 401', String(badSecret.status));
+  const badShape = await call(
+    'POST',
+    '/whale-arcade/wake',
+    { roomId: '../etc', sessionId: 'session1' },
+    { 'x-wake-secret': st.wake.secret },
+  );
+  assert(badShape.status === 400 && badShape.body?.error === 'bad-request', '非法 roomId 400', String(badShape.status));
+  const noServices = await call(
+    'POST',
+    '/whale-arcade/wake',
+    { roomId: 'room1', sessionId: 'session1', round: 1 },
+    { 'x-wake-secret': st.wake.secret },
+  );
+  assert(
+    noServices.status === 409 && noServices.body?.error === 'session-unavailable',
+    '宿主没服务时 409 session-unavailable',
+    String(noServices.status),
+  );
 }
 
 // ────────────────────────────── 浏览器半侧 ──────────────────────────────
