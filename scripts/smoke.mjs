@@ -8,6 +8,7 @@
  *               apply 注册了 sidebar.footer.action 与 shell.overlay 两个插槽
  */
 import { mkdirSync, readFileSync, rmSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
@@ -243,10 +244,26 @@ if (typeof stripVNode?.props?.onClick === 'function') {
 }
 renderSafely('悬浮气泡（无数据）', () => components['shell.overlay']({}));
 
+// ─────────────────── 本体一致性（第 21 轮） ───────────────────
+// vendor/app 是从平台构建拷进来的；VENDORED.txt 记了那份产物的 sha256。
+// 只要哈希对不上，就说明「平台改了但插件里的本体没跟着更」（或 vendor 被手改过）。
+try {
+  const body = readFileSync(join(process.cwd(), 'vendor', 'app', 'VENDORED.txt'), 'utf8');
+  const recorded = /dist sha256: ([0-9a-f]{64})/.exec(body)?.[1] ?? null;
+  const actual = createHash('sha256').update(readFileSync(join(process.cwd(), 'vendor', 'app', 'dist', 'index.js'))).digest('hex');
+  assert(recorded !== null, 'VENDORED.txt 记录了本体 sha256');
+  assert(recorded === actual, '插件里的本体与 VENDORED.txt 记录一致（改动后要重跑 vendor）', '跑 node scripts/vendor-app.mjs 重新同步');
+  const commitMatch = /platform commit: ([0-9a-f]{7,40})/.exec(body)?.[1] ?? '(未记录)';
+  console.log(`  本体来自平台提交 ${commitMatch}，sha256 ${actual.slice(0, 16)}…`);
+} catch (err) {
+  bad('本体一致性检查', err instanceof Error ? err.message : String(err));
+}
+
 // ─────────────────────────────── 收尾 ───────────────────────────────
 rmSync(dataHome, { recursive: true, force: true });
 rmSync(join(dataHome), { recursive: true, force: true });
 
 console.log(failed === 0 ? '\n✅ 自检全部通过' : `\n❌ ${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);
+
 

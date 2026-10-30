@@ -14,6 +14,8 @@
  *   默认读 AI_PLAYGROUND_REPO，再退回 ../ai-playground
  */
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -41,12 +43,34 @@ mkdirSync(VENDOR, { recursive: true });
 cpSync(dist, join(VENDOR, 'dist'), { recursive: true });
 cpSync(web, join(VENDOR, 'web'), { recursive: true });
 
-// 记一下来源，方便日后核对「插件里带的是哪一版平台」。
-// 只写版本与相对位置：这是要进公开仓库和 npm 包的文件，不能带本机绝对路径。
+/**
+ * 记下产物的 sha256 与平台提交（第 21 轮）。
+ *
+ * 为什么：本体是「平台构建 → 拷进插件」的二段式流程，最容易出的错就是
+ * 「平台改了、插件里的副本没跟着更」。记了哈希之后，`pnpm check` 能当场发现
+ * vendor 被手改 / 半途中断的不一致，而不是等用户装上才发现修复没生效。
+ */
+function sha256(file) {
+  return createHash('sha256').update(readFileSync(file)).digest('hex');
+}
+
+function platformCommit() {
+  try {
+    return execFileSync('git', ['-C', repo, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim();
+  } catch {
+    return 'unknown'; // 平台目录不是 git 仓库也照常可用
+  }
+}
+
+const distHash = sha256(join(VENDOR, 'dist', 'index.js'));
+
+// 只写版本、哈希与相对位置：这是要进公开仓库和 npm 包的文件，不能带本机绝对路径。
 writeFileSync(
   join(VENDOR, 'VENDORED.txt'),
   [
     `platform version: ${version}`,
+    `platform commit: ${platformCommit()}`,
+    `dist sha256: ${distHash}`,
     `vendored at: ${new Date().toISOString()}`,
     'source project: ai-playground (https://github.com/Treasure-hub-agent/ai-playground)',
     '',
