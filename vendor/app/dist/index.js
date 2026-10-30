@@ -32031,6 +32031,19 @@ function wakeConfigFromEnv(env = process.env) {
 function sleep2(ms) {
   return new Promise((resolve4) => setTimeout(resolve4, ms));
 }
+function retryDelays(env = process.env) {
+  const raw = env.WAKE_RETRY_DELAYS?.trim();
+  if (!raw) return DEFAULT_RETRY_DELAYS_MS;
+  const parsed = raw.split(",").map((part) => Number(part.trim())).filter((n) => Number.isFinite(n) && n >= 0);
+  return parsed.length > 0 ? parsed : DEFAULT_RETRY_DELAYS_MS;
+}
+function clearRetry(room) {
+  const timer = retryTimers.get(room);
+  if (timer) {
+    clearTimeout(timer);
+    retryTimers.delete(room);
+  }
+}
 function describeError3(error2) {
   if (error2 instanceof Error) {
     const code = error2.cause?.code;
@@ -32041,10 +32054,15 @@ function describeError3(error2) {
 function shouldWakeAgent(room) {
   if (!room.wake) return false;
   if (room.status !== "playing") return false;
-  if (room.game.meta.resolution === "turn") {
+  const mode = room.game.meta.resolution;
+  if (mode === "turn") {
     return (room.game.currentSeat?.(room.state) ?? null) === 1;
   }
-  return room.pending[0] !== null && room.pending[1] === null;
+  if (mode === "simultaneous") {
+    return room.pending[0] !== null && room.pending[1] === null;
+  }
+  console.warn(`[wake] \u672A\u77E5\u7684\u6E38\u620F\u7ED3\u7B97\u6A21\u5F0F\u300C${String(mode)}\u300D\uFF08\u623F\u95F4 ${room.id}\uFF09\uFF0C\u8DF3\u8FC7\u5524\u9192\u5224\u5B9A`);
+  return false;
 }
 function buildPayload(room, round, textView, sessionId, reason = "turn", resultText) {
   const payload2 = {
@@ -32157,6 +32175,10 @@ function dispatchWake(room, config2, payload2, key2, options, maxPerKey) {
   });
 }
 function scheduleAgentTurnWake(room, options = {}) {
+  clearRetry(room);
+  attemptAgentTurnWake(room, options, 0);
+}
+function attemptAgentTurnWake(room, options, attempt) {
   const config2 = wakeConfigFromEnv(options.env);
   if (config2 === null) return;
   if (!shouldWakeAgent(room) || !room.wake) return;
@@ -32172,9 +32194,48 @@ function scheduleAgentTurnWake(room, options = {}) {
   }
   if (!Number.isFinite(round)) return;
   const payload2 = buildPayload(room, round, textView, room.wake.sessionId, "turn");
-  dispatchWake(room, config2, payload2, `${room.id}:${round}`, options, WAKE_MAX_PER_ROUND);
+  const key2 = attempt === 0 ? `${room.id}:${round}` : `${room.id}:${round}:retry${attempt}`;
+  const innerOnResult = options.onResult;
+  dispatchWake(
+    room,
+    config2,
+    payload2,
+    key2,
+    {
+      onResult: (roomId, outcome) => {
+        try {
+          innerOnResult?.(roomId, outcome);
+        } catch (error2) {
+          console.warn(`[wake] \u8BB0\u5F55\u5524\u9192\u8BCA\u65AD\u5931\u8D25\uFF1A${describeError3(error2)}`);
+        }
+        if (outcome.ok) {
+          clearRetry(room);
+          return;
+        }
+        scheduleRetry(room, options, attempt + 1);
+      }
+    },
+    WAKE_MAX_PER_ROUND
+  );
+}
+function scheduleRetry(room, options, nextAttempt) {
+  const delays = retryDelays(options.env);
+  if (nextAttempt > delays.length) {
+    console.warn(`[wake] \u623F\u95F4 ${room.id} \u5524\u9192\u91CD\u8BD5 ${delays.length} \u6B21\u4ECD\u5931\u8D25\uFF0C\u653E\u5F03\uFF08\u5BF9\u5C40\u4E0D\u53D7\u5F71\u54CD\uFF0C\u4EBA\u7C7B\u53EF\u4EE5\u53D1\u6D88\u606F\u53EB Agent\uFF09`);
+    return;
+  }
+  const delay = delays[nextAttempt - 1];
+  clearRetry(room);
+  const timer = setTimeout(() => {
+    retryTimers.delete(room);
+    attemptAgentTurnWake(room, options, nextAttempt);
+  }, delay);
+  timer.unref?.();
+  retryTimers.set(room, timer);
+  console.warn(`[wake] \u623F\u95F4 ${room.id} \u5524\u9192\u5931\u8D25\uFF0C${delay}ms \u540E\u91CD\u8BD5\uFF08\u7B2C ${nextAttempt}/${delays.length} \u6B21\uFF09`);
 }
 function scheduleRoomEndWake(room, options = {}) {
+  clearRetry(room);
   const config2 = wakeConfigFromEnv(options.env);
   if (config2 === null) return;
   if (!room.wake) return;
@@ -32194,7 +32255,7 @@ function scheduleRoomEndWake(room, options = {}) {
   const payload2 = buildPayload(room, round, textView, room.wake.sessionId, "ended", resultText);
   dispatchWake(room, config2, payload2, `${room.id}:ended`, options, 1);
 }
-var WAKE_TIMEOUT_MS, WAKE_RETRY_DELAY_MS, WAKE_DEDUPE_MS, WAKE_MAX_PER_ROUND, WAKE_LOG_LIMIT, MAX_TEXT_VIEW_CHARS, wakeLog, dedupe, inFlight, warnedMissingSecret;
+var WAKE_TIMEOUT_MS, WAKE_RETRY_DELAY_MS, WAKE_DEDUPE_MS, WAKE_MAX_PER_ROUND, WAKE_LOG_LIMIT, MAX_TEXT_VIEW_CHARS, wakeLog, dedupe, inFlight, retryTimers, warnedMissingSecret, DEFAULT_RETRY_DELAYS_MS;
 var init_wake = __esm({
   "packages/server/src/wake.ts"() {
     "use strict";
@@ -32207,7 +32268,9 @@ var init_wake = __esm({
     wakeLog = [];
     dedupe = /* @__PURE__ */ new WeakMap();
     inFlight = /* @__PURE__ */ new Set();
+    retryTimers = /* @__PURE__ */ new WeakMap();
     warnedMissingSecret = false;
+    DEFAULT_RETRY_DELAYS_MS = [8e3, 2e4, 45e3];
   }
 });
 
