@@ -1620,9 +1620,10 @@ function buildReversiTextView(state, seat) {
     lines.push(` ${r + 1}  ` + row.join(" "));
   }
   if (spectator) lines.push("\u56FE\u4F8B\uFF1A\u25CF = \u5EA7\u4F4D 0\uFF0C\u25CB = \u5EA7\u4F4D 1\uFF1B\u65C1\u89C2\u89C6\u56FE\u4E0D\u5C55\u793A\u53EF\u843D\u70B9\u3002");
+  else if (!ended) lines.push(`\u56FE\u4F8B\uFF1A\u25CF = \u4F60\uFF08\u5EA7\u4F4D ${seat}\uFF09\uFF0C\u25CB = \u5BF9\u624B\uFF0C\xB7 = \u4F60\u73B0\u5728\u80FD\u843D\u5B50\uFF1B\u5217 A\u2013H\u3001\u884C 1\u20138\u3002`);
   if (ended) {
     const result = reversi.result(state);
-    lines.push(`\u5BF9\u5C40\u5DF2\u7ED3\u675F\uFF1A${result.text} \u53EF\u8C03\u7528 get_result / export_log\u3002`);
+    lines.push(`\u5BF9\u5C40\u5DF2\u7ED3\u675F\uFF1A${result.text}\uFF08Agent \u53EF\u7528 get_result / export_log \u590D\u76D8\uFF09`);
   } else if (spectator) {
     lines.push(`\u73B0\u5728\u8F6E\u5230\u5EA7\u4F4D ${state.turn} \u843D\u5B50\uFF0C\u65C1\u89C2\u89C6\u56FE\u4E0D\u53EF\u884C\u52A8\u3002`);
   } else if (state.turn === seat) {
@@ -2098,6 +2099,17 @@ function matchesLegalAction(action, pattern) {
   if (!isPlainRecord(action) || !isPlainRecord(pattern)) return false;
   return Object.keys(pattern).every((key2) => key2 in action && deepEqual(action[key2], pattern[key2]));
 }
+function stripActionHints(textView) {
+  return textView.split("\n").filter((line) => !ACTION_HINT_RE.test(line.trim())).join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
+}
+function decorateTextView(raw, info) {
+  if (!info.waiting && !info.submitted) return raw;
+  const body = stripActionHints(raw);
+  const banner = info.waiting ? info.unoccupied.length > 0 ? `\u23F3 \u8FD8\u6CA1\u5F00\u59CB\uFF1A\u5EA7\u4F4D ${info.unoccupied.join("\u3001")} \u8FD8\u6CA1\u5165\u5EA7\uFF0C\u73B0\u5728\u4E0D\u80FD\u51FA\u62DB\u3002` : "\u23F3 \u8FD8\u6CA1\u5F00\u59CB\uFF0C\u73B0\u5728\u4E0D\u80FD\u51FA\u62DB\u3002" : "\u2705 \u4F60\u5DF2\u51FA\u624B\uFF0C\u7B49\u5BF9\u624B\u63D0\u4EA4\uFF1B\u672C\u5C40\u8FD8\u6CA1\u7ED3\u7B97 \u2014\u2014 \u4E0D\u8981\u518D\u63D0\u4EA4\uFF08\u91CD\u590D\u63D0\u4EA4\u4F1A\u88AB\u62D2\uFF09\u3002";
+  return body ? `${banner}
+
+${body}` : banner;
+}
 function configurePersistence(config2) {
   defaultPersistConfig = config2;
 }
@@ -2115,7 +2127,7 @@ function activePersistenceInfo() {
   const file = latest.persistenceFile;
   return file === null ? null : { file, restored: latest.restoredCount };
 }
-var SESSION_ID_PATTERN, SeatTakenError, SeatTokenRequiredError, defaultPersistConfig, persistedManagers, RoomManager;
+var SESSION_ID_PATTERN, SeatTakenError, SeatTokenRequiredError, ACTION_HINT_RE, defaultPersistConfig, persistedManagers, RoomManager;
 var init_rooms = __esm({
   "packages/server/src/rooms.ts"() {
     "use strict";
@@ -2136,6 +2148,7 @@ var init_rooms = __esm({
         this.name = "SeatTokenRequiredError";
       }
     };
+    ACTION_HINT_RE = /^(轮到你了：|还没结束：|本局还没结算：|下一步：|可执行：)/;
     defaultPersistConfig = null;
     persistedManagers = /* @__PURE__ */ new Set();
     RoomManager = class {
@@ -2369,19 +2382,27 @@ var init_rooms = __esm({
           };
         }
         const obs = room.game.observe(room.state, seat);
+        const submitted = !turnBased && room.pending[seat] !== null;
+        const blocked = !playing || submitted;
         return {
           ...obs,
+          textView: decorateTextView(String(obs.textView ?? ""), {
+            waiting: room.status === "waiting",
+            submitted,
+            unoccupied: [0, 1].filter((s) => !room.occupied[s])
+          }),
           roomId: room.id,
           status: room.status,
           currentSeat,
           seat,
           spectator: false,
           isYourTurn: turnBased ? playing && currentSeat === seat : playing && room.pending[seat] === null,
-          youSubmitted: turnBased ? false : room.pending[seat] !== null,
+          youSubmitted: submitted,
+          legalActions: blocked ? [] : obs.legalActions ?? [],
           // 注意：这里**故意不回传挂起动作本身**。
           // 第 12 轮起 seat 参数不再代表身份（令牌才算），但即便拿到令牌也没必要把
           // 自己的挂起动作塞回观测里；需要"刷新后还记得自己出了什么"由客户端自己保存。
-          waitingFor: !playing ? [] : turnBased ? currentSeat === null ? [] : [currentSeat] : [0, 1].filter((s) => room.pending[s] === null),
+          waitingFor: !playing ? [0, 1].filter((s) => !room.occupied[s]) : turnBased ? currentSeat === null ? [] : [currentSeat] : [0, 1].filter((s) => room.pending[s] === null),
           result: room.result
         };
       }
@@ -2455,8 +2476,12 @@ var init_rooms = __esm({
         assertSeat(seat);
         const room = this.mustGet(id);
         this.assertSeatToken(room, seat, token);
-        const clean = String(text ?? "").trim().slice(0, 200);
-        if (!clean) throw new Error("\u7A7A\u6587\u672C");
+        const raw = String(text ?? "").trim();
+        if (!raw) throw new Error("\u7A7A\u6587\u672C");
+        if (raw.length > 200) {
+          throw new Error(`\u6587\u672C\u592A\u957F\uFF1A${raw.length} \u5B57\uFF0C\u4E0A\u9650 200 \u5B57\uFF08\u8BF7\u88C1\u526A\u540E\u518D\u53D1\uFF0C\u4E0D\u8981\u6307\u671B\u670D\u52A1\u7AEF\u66FF\u4F60\u622A\u65AD\uFF09`);
+        }
+        const clean = raw;
         const now = Date.now();
         if (now - (room.lastSayAt[seat] ?? 0) < 800) throw new Error("\u8BF4\u8BDD\u592A\u5FEB\u4E86\uFF0C\u6B47\u4E00\u4E0B");
         room.lastSayAt[seat] = now;
@@ -29034,7 +29059,7 @@ function formatEvents(rawEvents) {
       const flips = Array.isArray(ev.flips) ? ev.flips.length : 0;
       const counts = ev.counts ?? {};
       lines.push(
-        `\u26AB \u5EA7\u4F4D${ev.seat} \u843D\u5B50 ${cellText(ev.cell)}\uFF1A\u7FFB ${flips} \u5B50\uFF08\u5F53\u524D ${counts["0"] ?? "?"} : ${counts["1"] ?? "?"}\uFF09`
+        `\u26AB \u5EA7\u4F4D${ev.seat} \u843D\u5B50 ${cellText(ev.cell)}\uFF1A\u7FFB ${flips} \u5B50\uFF08\u5EA7\u4F4D0 ${counts["0"] ?? "?"} : \u5EA7\u4F4D1 ${counts["1"] ?? "?"}\uFF09`
       );
     } else if (ev.type === "pass") {
       lines.push(`\u23ED \u5EA7\u4F4D${ev.seat} \u65E0\u5B50\u53EF\u4E0B\uFF0C\u81EA\u52A8\u8DF3\u8FC7\uFF08\u4ECD\u7531\u5EA7\u4F4D ${ev.nextSeat} \u843D\u5B50\uFF09`);
@@ -32610,11 +32635,18 @@ function statusOf(err) {
   if (/房间不存在/.test(msg)) return 404;
   return 500;
 }
+function explainError(code) {
+  const known = ERROR_EXPLANATIONS[code];
+  if (known) return known;
+  return { message: `\u64CD\u4F5C\u5931\u8D25\uFF1A${code}\uFF08\u672A\u77E5\u9519\u8BEF\u7801\uFF0C\u53EF\u67E5\u770B\u670D\u52A1\u7AEF\u65E5\u5FD7\uFF09` };
+}
 function errorBody(err) {
   if (err instanceof SeatTokenRequiredError || err instanceof SeatTakenError) {
-    return { error: err.code };
+    const explained = explainError(err.code);
+    return { error: err.code, ...explained, message: err.message || explained.message };
   }
-  return { error: String(err?.message ?? err) };
+  const raw = String(err?.message ?? err);
+  return { error: raw, message: raw };
 }
 function sendError(res, err, extra = {}) {
   json2(res, statusOf(err), { ...extra, ...errorBody(err) });
@@ -32774,7 +32806,12 @@ async function handleApi(req, res, parts) {
           tokenFrom(req, body.token)
         );
         if (result.error) {
-          json2(res, 409, { ok: false, error: result.error, legalActions: result.legalActions ?? [] });
+          json2(res, 409, {
+            ok: false,
+            error: result.error,
+            ...explainError(result.error),
+            legalActions: result.legalActions ?? []
+          });
         } else {
           const after = rooms.get(roomId);
           if (after?.status === "ended") notifyRoomEnd(roomId);
@@ -33054,7 +33091,7 @@ function startServer() {
     }
   };
 }
-var PORT, HOST, REPO_ROOT, rooms, webDist, MIME, HttpError, MAX_BODY_BYTES;
+var PORT, HOST, REPO_ROOT, rooms, webDist, MIME, HttpError, MAX_BODY_BYTES, ERROR_EXPLANATIONS;
 var init_server3 = __esm({
   "packages/server/src/server.ts"() {
     "use strict";
@@ -33094,6 +33131,44 @@ var init_server3 = __esm({
       }
     };
     MAX_BODY_BYTES = 64 * 1024;
+    ERROR_EXPLANATIONS = {
+      seat_token_required: {
+        message: "\u8FD9\u4E2A\u5EA7\u4F4D\u6CA1\u6709\u6709\u6548\u4EE4\u724C\uFF0C\u52A8\u4F5C\u6CA1\u6709\u6267\u884C\uFF08\u4EE4\u724C\u6309\u5EA7\u4F4D\u9694\u79BB\uFF0C0 \u53F7\u4F4D\u4EE4\u724C\u4E0D\u80FD\u7528\u4E8E 1 \u53F7\u4F4D\uFF09\u3002",
+        next: "\u5E26\u4E0A\u8BE5\u5EA7\u4F4D\u7684\u4EE4\u724C\u91CD\u8BD5\uFF1B\u4EE4\u724C\u4E22\u4E86\u5C31\u91CD\u65B0\u5165\u5EA7\uFF08join\uFF09\uFF0C\u6216\u628A\u4E4B\u524D\u62FF\u5230\u7684\u4EE4\u724C\u653E\u8FDB token \u53C2\u6570\u5E42\u7B49\u7EED\u5EA7\u3002"
+      },
+      seat_taken: {
+        message: "\u8BE5\u5EA7\u4F4D\u5DF2\u88AB\u5360\u7528\uFF0C\u800C\u4E14\u4F60\u624B\u91CC\u7684\u4EE4\u724C\u5BF9\u4E0D\u4E0A\u3002",
+        next: "\u5982\u679C\u4F60\u4E4B\u524D\u5165\u5EA7\u8FC7\uFF1A\u5E26\u539F\u4EE4\u724C\u518D\u5165\u5EA7\u4E00\u6B21\u5373\u53EF\u7EED\u5EA7\uFF1B\u5426\u5219\u8BF7\u6362\u4E00\u4E2A\u623F\u95F4\u3002"
+      },
+      seat_not_joined: {
+        message: "\u8FD9\u4E2A\u5EA7\u4F4D\u8FD8\u6CA1\u5165\u5EA7\uFF0C\u6240\u4EE5\u4E0D\u80FD\u51FA\u62DB\uFF08\u7528 humanUrl \u6253\u5F00\u4F1A\u7531\u524D\u7AEF\u81EA\u52A8\u5165\u5EA7\uFF1B\u88F8 REST \u9700\u8981\u5148 join\uFF09\u3002",
+        next: '\u5148 POST /api/rooms/{id}/join {"seat":N,"token":"<\u8BE5\u5EA7\u4F4D\u4EE4\u724C>"} \u5165\u5EA7\uFF0C\u518D\u63D0\u4EA4\u52A8\u4F5C\u3002'
+      },
+      waiting_for_opponent: {
+        message: "\u53CC\u65B9\u8FD8\u6CA1\u5230\u9F50\uFF0C\u5BF9\u5C40\u5C1A\u672A\u5F00\u59CB\u3002",
+        next: "\u7B49\u53E6\u4E00\u65B9\u5165\u5EA7\u540E\u518D\u51FA\u62DB\uFF1B\u89C2\u5BDF waitingFor \u5B57\u6BB5\u770B\u8FD8\u7F3A\u54EA\u4E2A\u5EA7\u4F4D\u3002"
+      },
+      not_your_turn: {
+        message: "\u73B0\u5728\u4E0D\u662F\u8FD9\u4E2A\u5EA7\u4F4D\u7684\u56DE\u5408\u3002",
+        next: "\u8BFB state \u7684 currentSeat / isYourTurn\uFF0C\u8F6E\u5230\u4F60\u4E86\u518D\u63D0\u4EA4\u3002"
+      },
+      illegal_action: {
+        message: "\u8FD9\u4E2A\u52A8\u4F5C\u4E0D\u7B26\u5408\u89C4\u5219\uFF0C\u6CA1\u6709\u6267\u884C\u3002",
+        next: "\u6309\u8FD4\u56DE\u7684 legalActions \u91CC\u6311\u4E00\u4E2A\u5408\u6CD5\u52A8\u4F5C\u91CD\u8BD5\u3002"
+      },
+      action_already_submitted: {
+        message: "\u672C\u56DE\u5408\u4F60\u5DF2\u7ECF\u63D0\u4EA4\u8FC7\u4E86\uFF08\u540C\u65F6\u6697\u9009\u6E38\u620F\u6BCF\u56DE\u5408\u53EA\u80FD\u4EA4\u4E00\u6B21\uFF09\u3002",
+        next: "\u7B49\u5BF9\u624B\u63D0\u4EA4\u3001\u672C\u56DE\u5408\u7ED3\u7B97\u540E\u518D\u51FA\u4E0B\u4E00\u624B\uFF1B\u4E0D\u8981\u91CD\u590D\u63D0\u4EA4\u3002"
+      },
+      room_ended: {
+        message: "\u5BF9\u5C40\u5DF2\u7ECF\u7ED3\u675F\u4E86\uFF0C\u4E0D\u80FD\u518D\u51FA\u62DB\u3002",
+        next: "\u60F3\u770B\u7ED3\u679C\u7528 GET /api/rooms/{id}/result\uFF0C\u590D\u76D8\u7528 /log\u3002"
+      },
+      room_not_found: {
+        message: "\u6CA1\u6709\u8FD9\u4E2A\u623F\u95F4\uFF08\u53EF\u80FD\u623F\u95F4\u53F7\u5199\u9519\uFF0C\u6216\u5DF2\u88AB\u6E05\u7406\uFF09\u3002",
+        next: "\u7528 playground_create_room \u5F00\u65B0\u684C\u3002"
+      }
+    };
   }
 });
 
