@@ -159,16 +159,27 @@ WAKE_SECRET=<密钥>
 
 ## 装
 
-### 从 npm（推荐）
+### 从 GitHub 装（当前最新版 0.1.3，含唤醒桥）
+
+> npm 上还停在 **0.1.2**（没有唤醒桥），想体验「人类落子后被自动叫醒」就用这条。
+
+```bash
+dsh plugin --profile desktop add github:Treasure-hub-agent/dsh-whale-game
+```
+
+装完**重启 DSH**，左侧栏底部会出现 🎮 大肥鱼游戏厅。
+
+> 从 Git 装时 `prepare` 会自动跑一次 `node build.mjs` 产出 `lib/`，
+> 所以需要本机能装 npm 依赖（pnpm/npm 都行）；产物很小，`vendor/app` 已经在仓库里。
+
+### 从 npm（0.1.2，不含唤醒桥）
 
 ```bash
 dsh plugin --profile desktop add dsh-whale-game
 ```
 
-装完**重启 DSH**，左侧栏底部会出现 🎮 大肥鱼游戏厅。
-
 > **插件自带游戏厅本体**（`vendor/app`，六款游戏 + 网页 + 音频，约 14.6 MB），
-> 所以点开就能玩——不需要另外 clone 平台、装依赖或联网下载。包体积也因此是 13.4 MB。
+> 所以点开就能玩——不需要另外 clone 平台、装依赖或联网下载。
 
 > 包名是 `dsh-whale-game`（`dsh-whale-arcade` 已被另一个插件占用）。
 > 也可以在 <https://www.npmjs.com/package/dsh-whale-game> 看到它。
